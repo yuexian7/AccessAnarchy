@@ -1,8 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--Access Anarchy 发布元数据。首发（Publish 命令）成功后把返回的 ModId 回填到 <ModId Value="..." />，之后重传二进制一律用 PublishNewVersion（Update 会烧版本号，见 BridgeTheLanguageGap 交接文档 §8）。-->
 <PublishConfiguration>
-	<ModId Value="" />
+	<!--首发成功（2026-09-12，Unlisted）：ModId 158842。此后重传二进制一律用 PublishNewVersion，别用 Update（会烧版本号）。-->
+	<ModId Value="158842" />
 	<ModVersion Value="0.6.0" />
+	<!--线上 requiredVersion 就是这个值；本机游戏 bundleVersion 实测 1.6.0f1（Unity 2022.3.71f1）-->
+	<GameVersion Value="1.6.*" />
 	<AccessLevel Value="Unlisted" />
 	<DisplayName Value="Access Anarchy" />
 	<ShortDescription Value="Vehicles pass through pedestrians at building access points - no more clogging at entrances." />
@@ -17,5 +20,13 @@ Options (12 languages):
 Compatible with Cities: Skylines II 1.6.x. Source code on GitHub." />
 	<Thumbnail Value="Properties/Thumbnail.png" />
 	<Tag Value="Code Mod" />
-	<ExternalLink Type="github" Url="https://github.com/10975/AccessAnarchy" />
+	<ExternalLink Type="github" Url="https://github.com/yuexian7/AccessAnarchy" />
+	<ChangeLog>
+		<v0.6.0>
+			Initial release.
+			Vehicles pass through pedestrians at building access points (parking lots, warehouses, stores...). Pedestrians keep walking normally; car-to-car yielding and crosswalks are untouched.
+			Zero Harmony patches - pure ECS data editing. 12-language settings UI.
+			Scope modes: access zones only (default) or all roads (global).
+		</v0.6.0>
+	</ChangeLog>
 </PublishConfiguration>

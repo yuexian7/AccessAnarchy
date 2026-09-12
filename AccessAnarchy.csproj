@@ -1,0 +1,110 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+	<PropertyGroup>
+		<Configurations>Debug;Release</Configurations>
+
+		<!--发布到 Paradox Mods 时所需的元数据文件路径-->
+		<PublishConfigurationPath>Properties\PublishConfiguration.xml</PublishConfigurationPath>
+	</PropertyGroup>
+
+	<!--官方工具链（CSII_TOOLPATH 指向 .cache\Modding），必须在 PropertyGroup 之后导入-->
+	<Import Project="$([System.Environment]::GetEnvironmentVariable('CSII_TOOLPATH', 'EnvironmentVariableTarget.User'))\Mod.props" />
+	<Import Project="$([System.Environment]::GetEnvironmentVariable('CSII_TOOLPATH', 'EnvironmentVariableTarget.User'))\Mod.targets" />
+
+	<ItemGroup>
+		<!--
+		  本机没有 net48 目标包（无 Visual Studio），此包只提供编译期参考程序集，PrivateAssets=all 保证不进产物。
+		  本模组零 Harmony 补丁（ECS 数据编辑路线），故不引用 Lib.Harmony。
+		-->
+		<PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
+	</ItemGroup>
+
+	<!--
+	  覆盖 Mod.targets 的同名 Target，唯一目的是给子进程注入 DOTNET_ROLL_FORWARD=Major：
+	  ModPostProcessor.exe 目标 net6.0，本机只有 .NET 8 运行时，不注入就报找不到框架（退出码 -2147450730）。
+	  BeforeTargets="DeployWIP" 是修正执行顺序的关键（见 BridgeTheLanguageGap 交接文档 §10 #23）。
+	-->
+	<Target Name="RunModPostProcessor" AfterTargets="AfterBuild" BeforeTargets="DeployWIP" Condition="'$(NeedBuild)'">
+		<Error Condition="!Exists('$(ModPostProcessorFullPath)')" Text="Post processor not found, please check the path: $(ModPostProcessorFullPath)" />
+		<Message Text="Run post processor: $(ModPostProcessorArgs)" Importance="high" />
+		<Exec Command="$(ModPostProcessorArgs)" EnvironmentVariables="DOTNET_ROLL_FORWARD=Major" LogStandardErrorAsError="true" />
+	</Target>
+
+	<!--ModPublisher.exe 同为 net6.0 目标，同样需要注入。-->
+	<Target Name="RunModPublisher" AfterTargets="Publish">
+		<Error Condition="!Exists('$(ModPublisherPath)')" Text="Mod publisher not found, please check the path: $(ModPublisherPath)" />
+		<Message Text="Run mod publisher: $(ModPublisherArgs)" Importance="high" />
+		<Exec Command="$(ModPublisherArgs)" EnvironmentVariables="DOTNET_ROLL_FORWARD=Major" LogStandardErrorAsError="true" />
+	</Target>
+
+	<!--
+	  research\ 与 template\ 是开发期反编译调研产物与官方模板副本，绝不能编进模组产物
+	  （SDK 工程 默认通配 **/*.cs，与 BridgeTheLanguageGap 交接文档 §7 T3 的教训一致）。
+	-->
+	<ItemGroup>
+		<Compile Remove="research\**" />
+		<Compile Remove="template\**" />
+		<None Remove="research\**" />
+		<None Remove="template\**" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<Reference Include="Game">
+			<Private>false</Private>
+		</Reference>
+		<Reference Include="Colossal.Core">
+			<Private>false</Private>
+		</Reference>
+		<Reference Include="Colossal.Mathematics">
+			<Private>false</Private>
+		</Reference>
+		<Reference Include="Colossal.Logging">
+			<Private>false</Private>
+		</Reference>
+		<Reference Include="Colossal.IO.AssetDatabase">
+			<Private>false</Private>
+		</Reference>
+		<Reference Include="Colossal.UI">
+			<Private>false</Private>
+		</Reference>
+		<Reference Include="Colossal.UI.Binding">
+			<Private>false</Private>
+		</Reference>
+		<Reference Include="Colossal.Localization">
+			<Private>false</Private>
+		</Reference>
+		<Reference Include="UnityEngine.CoreModule">
+			<Private>false</Private>
+		</Reference>
+		<Reference Include="Unity.Burst">
+			<Private>false</Private>
+		</Reference>
+		<Reference Include="Unity.Collections">
+			<Private>false</Private>
+		</Reference>
+		<Reference Include="Unity.Entities">
+			<Private>false</Private>
+		</Reference>
+		<Reference Include="Unity.Mathematics">
+			<Private>false</Private>
+		</Reference>
+	</ItemGroup>
+
+	<ItemGroup>
+		<Reference Update="System">
+			<Private>false</Private>
+		</Reference>
+		<Reference Update="System.Core">
+			<Private>false</Private>
+		</Reference>
+		<Reference Update="System.Data">
+			<Private>false</Private>
+		</Reference>
+	</ItemGroup>
+
+	<ItemGroup>
+		<None Include="$(ModPropsFile)" Link="Properties\Mod.props" />
+		<None Include="$(ModTargetsFile)" Link="Properties\Mod.targets" />
+	</ItemGroup>
+
+</Project>

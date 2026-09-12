@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--Access Anarchy 发布元数据。首发（Publish 命令）成功后把返回的 ModId 回填到 <ModId Value="..." />，之后重传二进制一律用 PublishNewVersion（Update 会烧版本号，见 BridgeTheLanguageGap 交接文档 §8）。-->
+<PublishConfiguration>
+	<ModId Value="" />
+	<ModVersion Value="0.6.0" />
+	<AccessLevel Value="Unlisted" />
+	<DisplayName Value="Access Anarchy" />
+	<ShortDescription Value="Vehicles pass through pedestrians at building access points - no more clogging at entrances." />
+	<LongDescription Value="Access Anarchy lets vehicles drive straight through pedestrians at building access points - parking lots, warehouses, cargo terminals, stores - so entrances never clog up while pedestrians keep walking normally.
+
+How it works: zero Harmony patches. The mod edits shared ECS simulation data (pedestrian lane registrations and lane overlap relations near building entrances) instead of patching game methods, following the Anarchy mod philosophy. Car-to-car yielding, pedestrian pathfinding and crosswalk behaviour are untouched.
+
+Options (12 languages):
+- Scope mode: access zones only (default), or all roads (global).
+- Per-category toggles: garage ramps, building driveways, parking lots and building-internal lanes.
+
+Compatible with Cities: Skylines II 1.6.x. Source code on GitHub." />
+	<Thumbnail Value="Properties/Thumbnail.png" />
+	<Tag Value="Code Mod" />
+	<ExternalLink Type="github" Url="https://github.com/10975/AccessAnarchy" />
+</PublishConfiguration>

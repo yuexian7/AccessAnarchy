@@ -1,0 +1,19 @@
+# 构建产物
+bin/
+obj/
+
+# 开发期调研产物：2333 个反编译文件 + 工具，不属于模组源码
+research/
+
+# 官方模板解包副本（已在 csproj 排除编译）
+template/
+
+# IDE / 工具
+.vs/
+.idea/
+*.user
+.zcode/
+Library/
+
+# 模组设置缓存（含本机路径）
+*.coc

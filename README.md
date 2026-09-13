@@ -16,10 +16,14 @@
 
 ## 安装
 
-开发构建已部署在本机游戏用户数据目录：
+开发构建可部署到以下任一位置（游戏会扫描两者）：
 
 ```
+# 用户数据目录（官方推荐）
 C:\Users\10975\AppData\LocalLow\Colossal Order\Cities Skylines II\Mods\AccessAnarchy\
+
+# 游戏安装目录（当前本机测试位：加前导点禁用加载，去掉即启用）
+F:\SteamLibrary\steamapps\common\Cities Skylines II\Cities Skylines II\Mods\.AccessAnarchy\
 ```
 
 启动游戏后在"内容管理 → 模组"里启用 **Access Anarchy** 即可。
@@ -64,7 +68,7 @@ AccessAnarchy/
 ├── Setting.cs                        # 选项面板（ModSetting 框架，中英双语）
 ├── Systems/
 │   └── AccessZoneOverlapSystem.cs    # 核心：删除出入口车道↔行人道的 LaneOverlap
-├── Properties/PublishConfiguration.xml  # Paradox Mods 发布元数据（未发布，ModId 留空）
+├── Properties/PublishConfiguration.xml  # Paradox Mods 发布元数据（已发布：ModId 158842，v0.6.0 Public）
 ├── research/                         # 开发期反编译调研产物（不参与编译）
 └── template/                         # 官方模组模板副本（不参与编译）
 ```

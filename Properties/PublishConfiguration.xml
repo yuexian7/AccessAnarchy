@@ -3,24 +3,18 @@
 <PublishConfiguration>
 	<!--首发成功（2026-09-12，Unlisted）：ModId 158842。此后重传二进制一律用 PublishNewVersion，别用 Update（会烧版本号）。-->
 	<ModId Value="158842" />
+	<ForumLink Value="https://forum.paradoxplaza.com/forum/threads/access-anarchy.1941285/" />
 	<ModVersion Value="0.6.0" />
 	<!--线上 requiredVersion 就是这个值；本机游戏 bundleVersion 实测 1.6.0f1（Unity 2022.3.71f1）-->
 	<GameVersion Value="1.6.*" />
-	<AccessLevel Value="Unlisted" />
+	<AccessLevel Value="Public" />
 	<DisplayName Value="Access Anarchy" />
 	<ShortDescription Value="Vehicles pass through pedestrians at building access points - no more clogging at entrances." />
-	<LongDescription Value="Access Anarchy lets vehicles drive straight through pedestrians at building access points - parking lots, warehouses, cargo terminals, stores - so entrances never clog up while pedestrians keep walking normally.
-
-How it works: zero Harmony patches. The mod edits shared ECS simulation data (pedestrian lane registrations and lane overlap relations near building entrances) instead of patching game methods, following the Anarchy mod philosophy. Car-to-car yielding, pedestrian pathfinding and crosswalk behaviour are untouched.
-
-Options (12 languages):
-- Scope mode: access zones only (default), or all roads (global).
-- Per-category toggles: garage ramps, building driveways, parking lots and building-internal lanes.
-
-Compatible with Cities: Skylines II 1.6.x. Source code on GitHub." />
+	<LongDescription Value="## **English：**&#xA;&#xA;I am at my wit’s end with pedestrians.&#xA;&#xA;In Cities: Skylines II, pedestrians do not actively yield to vehicles, which means that in high-foot-traffic areas, parking lots are constantly jammed with cars stuck outside the entrance.&#xA;&#xA;The problem is even worse with some high-density residential buildings and unique high-density commercial buildings: pedestrians often block the entrances completely, triggering total traffic chaos. And unlike parking lots, there is no way to separate pedestrian and vehicle flows.&#xA;&#xA;This mod was created to solve exactly that problem. Access Anarchy allows vehicles to pass through pedestrians without yielding when entering or exiting parking lots, warehouses, shopping centers, and similar buildings. In other words, collision detection is disabled in those situations, so vehicles will clip through pedestrians. Of course, on roads, vehicles will still yield to pedestrians as usual.&#xA;&#xA;Warning: this mod is currently still in **beta**. Depending on real-world performance, the larger the city becomes, the greater the impact on performance. If the frame rate drops significantly, please disable the mod. Turning off the first option is enough. I will continue working on frame-rate optimization later.&#xA;&#xA;As for compatibility, I have not encountered any conflicts or errors while running the mod alongside dozens of mainstream mods. In theory, this mod should not affect the traffic behavior of vehicles or pedestrians. If you run into any issues, please leave feedback in the discussion forum.&#xA;&#xA;If you find it helpful, I’d really appreciate it if you could buy me a coffee~&#xA;&#xA;## **中文：**&#xA;&#xA;我快被行人逼疯了！！！由于天际线2的行人不会主动避让车辆，导致高人流区域的停车场永远有一堆车堵在外面。&#xA;&#xA;还有一些高密度住宅、高密度商业独特建筑，出入口经常被行人堵死，然后导致交通爆炸，你甚至还没办法像停车场一样做人车分离。&#xA;&#xA;忍无可忍了，这个模组就是为了解决这个问题，Access Anarchy 让车辆在通过停车场、仓库、商场等建筑物的出入口时不再避让行人，直接穿过行人（取消碰撞检测，会发生穿模）。当然在马路上时，车辆依然会避让行人。&#xA;&#xA;警告：模组目前还处于beta测试阶段。根据实际表现，城市规模越大对性能的影响就越大，如果帧数降低很夸张的话，请关闭模组（第一个选项关掉就行）。后面我会再继续优化帧数的。兼容性的话，我在装载数十个主流MOD的情况下并没有发生冲突或报错，理论上本模组不会影响车辆、行人的交通行为，如果你有碰到任何问题可以到讨论区反馈。&#xA;&#xA;如果你觉得有用的话，可以请我喝杯咖啡吗~" />
 	<Thumbnail Value="Properties/Thumbnail.png" />
 	<Tag Value="Code Mod" />
 	<ExternalLink Type="github" Url="https://github.com/yuexian7/AccessAnarchy" />
+	<ExternalLink Type="kofi" Url="https://ko-fi.com/yuexian7" />
 	<ChangeLog>
 		<v0.6.0>
 			Initial release.

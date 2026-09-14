@@ -1,0 +1,26 @@
+
+#### ProxyAction members
+== research/decompiled/Game/Input/ProxyAction.cs (720 lines)
+  494: public bool WasPressedThisFrame()
+  496: return m_SourceAction.WasPressedThisFrame();
+
+#### ProxyBinding members
+== research/decompiled/Game/Input/ProxyBinding.cs (844 lines)
+  286: public string mapName => m_MapName;
+  288: public string actionName => m_ActionName;
+  504: public string path
+  532: public string originalPath
+  634: public ProxyBinding(string mapName, string actionName, ActionComponent component, string name, CompositeInstance source)
+  653: public ProxyBinding(InputAction action, ActionComponent component, string name, CompositeInstance source)
+  726: internal Watcher CreateWatcher(Action<ProxyBinding> onChange = null)
+
+#### RegisterKeyBindings callers
+== research/decompiled/Game/Modding/ModSetting.cs (372 lines)
+  141: public void RegisterKeyBindings()
+  270: protected internal void ApplyKeyBindings()
+
+#### ModSetting usage panels
+
+#### TranslationCSVParser
+
+#### LocaleSupport

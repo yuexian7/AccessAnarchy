@@ -1,0 +1,37 @@
+== decompiled/Game/Input/InputManager.cs (2202 lines)
+  1429: foreach (var (_, proxyBinding2) in proxyComposite2.bindings)
+  1431: if ((proxyBinding2.hasConflicts & ProxyBinding.ConflictType.WithBuiltIn) != 0)
+  1433: if (proxyBinding2.isBuiltIn)
+  1435: bindingConflicts |= proxyBinding2.device;
+== decompiled/Game/Input/ProxyBinding.cs (845 lines)
+  490: foreach (var (_, proxyBinding2) in proxyComposite2.bindings)
+  492: if ((flag || !componentComparer.Equals(this, proxyBinding2)) && ConflictsWith(this, proxyBinding2, checkUsage: true))
+  494: m_Conflicts.Add(proxyBinding2);
+== decompiled/Game/Modding/ModSetting.cs (373 lines)
+  61: ProxyBinding proxyBinding = GenerateBinding(propertyInfo);
+  62: propertyInfo.SetValue(this, proxyBinding);
+== decompiled/Game/Settings/InputSettings.cs (307 lines)
+  282: ProxyBinding proxyBinding = value2;
+  283: if (actionPart.m_Transform == UIBaseInputAction.Transform.None || (proxyBinding.component.ToTransform() & actionPart.m_Transform) != 0)
+  285: ProxyBinding aliasBinding = proxyBinding.Copy();
+== decompiled/Game/UI/InputHintBindings.cs (517 lines)
+  377: ProxyBinding proxyBinding = action.bindings.Where((ProxyBinding b) => MatchesControlScheme(b, query.controlScheme)).Skip(query.index).FirstOrDefault();
+  387: bindings = new ControlPath[1] { ControlPath.Get(proxyBinding.path) },
+  388: modifiers = proxyBinding.modifiers.Select((ProxyModifier m) => ControlPath.Get(m.m_Path)).ToArray()
+== decompiled/Game/UI/Menu/InputRebindingUISystem.cs (769 lines)
+  449: ProxyBinding proxyBinding = newBinding;
+  450: ProxyBinding proxyBinding2 = oldBinding;
+  451: CollectBindingConflicts(list2, proxyBinding, proxyBinding2);
+  452: CollectBindingConflicts(list3, proxyBinding2, proxyBinding);
+  453: otherUsages2 = Usages.Combine(otherUsages2, proxyBinding2.usages);
+  498: foreach (var (_, proxyBinding2) in proxyComposite2.bindings)
+  500: if ((!flag && ProxyBinding.componentComparer.Equals(proxyBinding2, toCheck)) || !ProxyBinding.PathEquals(proxyBinding2, toCheck) || proxyBinding2.usages.isNone)
+  504: BindingPair item = new BindingPair(proxyBinding2, resolution);
+  511: if (linkedAction.m_Device == proxyBinding2.device && linkedAction.m_Action.TryGetComposite(proxyBinding2.device, out var composite) && composite.TryGetBinding(proxyBinding2.component, out var foundBin
+  561: foreach (var (_, proxyBinding2) in proxyComposite2.bindings)
+  563: if (ProxyBinding.componentComparer.Equals(oldBinding, proxyBinding2))
+  565: if (!proxyBinding2.isRebindable)
+  569: ProxyBinding newBinding2 = proxyBinding2.Copy();
+  582: if (!rebindingMap.TryGetValue(proxyBinding2, out var value))
+  585: rebindingMap[proxyBinding2] = value;
+  587: value.Add(new BindingPair(proxyBinding2, newBinding2));

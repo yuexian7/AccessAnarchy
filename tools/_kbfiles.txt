@@ -1,0 +1,6 @@
+6|./decompiled/Game/Settings/SharedSettings.cs
+2|./decompiled/Game/Settings/KeybindingSettings.cs
+2|./decompiled/Game/Settings/SettingsUIKeybindingAttribute.cs
+1|./decompiled/Game/Settings/SettingsUIGamepadBindingAttribute.cs
+1|./decompiled/Game/Settings/SettingsUIKeyboardBindingAttribute.cs
+1|./decompiled/Game/Settings/SettingsUIMouseBindingAttribute.cs

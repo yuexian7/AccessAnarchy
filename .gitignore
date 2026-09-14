@@ -17,3 +17,6 @@ Library/
 
 # 模组设置缓存（含本机路径）
 *.coc
+
+# 临时 API 输出
+out_api.txt

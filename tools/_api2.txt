@@ -1,0 +1,303 @@
+=== [1] csproj ===
+	<Import Project="$([System.Environment]::GetEnvironmentVariable('CSII_TOOLPATH', 'EnvironmentVariableTarget.User'))\Mod.props" />
+	<Import Project="$([System.Environment]::GetEnvironmentVariable('CSII_TOOLPATH', 'EnvironmentVariableTarget.User'))\Mod.targets" />
+		<PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
+		<Reference Include="Game">
+		<Reference Include="Colossal.Core">
+		<Reference Include="Colossal.Mathematics">
+		<Reference Include="Colossal.Logging">
+		<Reference Include="Colossal.IO.AssetDatabase">
+		<Reference Include="Colossal.UI">
+		<Reference Include="Colossal.UI.Binding">
+		<Reference Include="Colossal.Localization">
+		<Reference Include="UnityEngine.CoreModule">
+		<Reference Include="Unity.Burst">
+		<Reference Include="Unity.Collections">
+		<Reference Include="Unity.Entities">
+		<Reference Include="Unity.Mathematics">
+=== [2] InputManager.AddActions ===
+677:	internal void AddActions(ProxyAction.Info[] actionsToAdd)
+sed: -e expression #1, char 1: unknown command: `,'
+=== [3] LocalizationMod AddActions usage ===
+cat: research/decompiled/Game/Modding/LocalizationMod.cs: No such file or directory
+=== [4] AutomaticSettings ProxyBinding branch ===
+		{
+			if (property.canRead && !property.canWrite)
+			{
+				return WidgetType.LocalizedStringField;
+			}
+			return WidgetType.None;
+		}
+		if (property.propertyType == typeof(ProxyBinding))
+		{
+			return WidgetType.KeyBinding;
+		}
+		if (property.propertyType.IsEnum)
+		{
+			if (property.HasAttribute<SettingsUIDropdownAttribute>())
+			{
+				return WidgetType.AdvancedEnumDropdown;
+			}
+			return WidgetType.EnumDropdown;
+		}
+		if (property.HasAttribute<SettingsUIDropdownAttribute>())
+		{
+			return WidgetType.CustomDropdown;
+		}
+		return WidgetType.None;
+	}
+
+	public static LocalizedString GetConfirmationMessage(SettingItemData itemData)
+	{
+		SettingsUIConfirmationAttribute attribute = itemData.property.GetAttribute<SettingsUIConfirmationAttribute>();
+		if (attribute != null)
+		{
+			if (!string.IsNullOrEmpty(attribute.confirmMessageId))
+			{
+				return LocalizedString.IdWithFallback("Options.WARNING[" + attribute.confirmMessageId + "]", attribute.confirmMessageValue);
+			}
+			if (!string.IsNullOrEmpty(attribute.confirmMessageValue))
+			{
+				return LocalizedString.Value(attribute.confirmMessageValue);
+			}
+		}
+		string text = itemData.property.declaringType.Name + "." + itemData.property.name;
+		if (!string.IsNullOrEmpty(itemData.prefix))
+		{
+			text = itemData.prefix + "." + text;
+		}
+		text = "Options.WARNING[" + text + "]";
+		return LocalizedString.Id(text);
+	}
+
+	public static IWidget AddBoolButtonWithConfirmationProperty(SettingItemData itemData)
+	{
+		ButtonWithConfirmation item = new ButtonWithConfirmation
+		{
+			path = itemData.path,
+			displayName = itemData.displayName,
+			description = itemData.description,
+			displayNameAction = itemData.dispayNameAction,
+			descriptionAction = itemData.descriptionAction,
+			action = delegate
+			{
+				itemData.property.SetValue(itemData.setting, true);
+			},
+			disabled = itemData.disableAction,
+			hidden = itemData.hideAction,
+			confirmationMessage = GetConfirmationMessage(itemData)
+		};
+		if (GetButtonsGroup(itemData.property.GetAttribute<SettingsUIButtonGroupAttribute>()?.name ?? (itemData.property.declaringType.Name + "." + itemData.property.name + "_ButtonGroup"), out var buttons, item))
+		{
+			return buttons;
+		}
+		return null;
+=== [5] ModSetting ctor+Register+Save+GetBindingDisplayName ===
+		{
+			actionName = attribute3.actionName ?? property.Name;
+			device = attribute3.device;
+			type = attribute3.type;
+			component = attribute3.component;
+			control = attribute3.control;
+			modifierControls = attribute3.modifierControls;
+		}
+		else
+		{
+			actionName = property.Name;
+			device = InputManager.DeviceType.Keyboard;
+			type = ActionType.Button;
+			component = ActionComponent.Press;
+			control = string.Empty;
+			modifierControls = Array.Empty<string>();
+		}
+		if (!TryGetSourceBindingForMimic(property, device, component, out var sourceBinding))
+		{
+			return CreateBinding(device, actionName, type, component, control, modifierControls);
+		}
+		return CreateMimicBinding(device, actionName, type, component, sourceBinding);
+	}
+
+	private bool TryGetSourceBindingForMimic(PropertyInfo property, InputManager.DeviceType device, ActionComponent component, out ProxyBinding sourceBinding)
+	{
+		sourceBinding = default(ProxyBinding);
+		if (!((MemberInfo)property).TryGetAttribute(out SettingsUIBindingMimicAttribute attribute, inherit: false))
+		{
+			return false;
+		}
+		if (!InputManager.instance.TryFindAction(attribute.map, attribute.action, out var action) || !action.isBuiltIn)
+		{
+			return false;
+		}
+		if (!action.TryGetComposite(device, out var composite))
+		{
+			return false;
+		}
+		if (!composite.TryGetBinding(component, out sourceBinding))
+		{
+			return false;
+		}
+		return true;
+	}
+
+	public void RegisterKeyBindings()
+	{
+		if (keyBindingRegistered)
+		{
+			return;
+		}
+		PropertyInfo[] array = keyBindingProperties;
+		Dictionary<string, (ProxyAction.Info, List<PropertyInfo>)> dictionary = new Dictionary<string, (ProxyAction.Info, List<PropertyInfo>)>();
+		Dictionary<(string, InputManager.DeviceType), SettingsUIInputActionAttribute> dictionary2 = new Dictionary<(string, InputManager.DeviceType), SettingsUIInputActionAttribute>();
+		foreach (SettingsUIInputActionAttribute attribute in ReflectionUtils.GetAttributes<SettingsUIInputActionAttribute>(GetType().GetCustomAttributes(inherit: false)))
+		{
+			dictionary2.TryAdd((attribute.name, attribute.device), attribute);
+		}
+		foreach (PropertyInfo propertyInfo in array)
+		{
+			ProxyBinding binding = (ProxyBinding)propertyInfo.GetValue(this);
+			if (!dictionary.TryGetValue(binding.actionName, out var value))
+			{
+				ProxyAction.Info item = default(ProxyAction.Info);
+				item.m_Map = binding.mapName;
+				item.m_Name = binding.actionName;
+				item.m_Type = binding.component.GetActionType();
+				item.m_Composites = new List<ProxyComposite.Info>();
+				value = (item, new List<PropertyInfo>());
+			}
+			if (binding.component.GetActionType() != value.Item1.m_Type)
+			{
+				continue;
+			}
+			value.Item2.Add(propertyInfo);
+			ProxyComposite.Info item2 = value.Item1.m_Composites.FirstOrDefault((ProxyComposite.Info info) => info.m_Device == binding.device);
+			if (item2.m_Source == null)
+			{
+				if (!InputManager.TryGetCompositeData(binding.component.GetActionType(), out var data))
+				{
+					continue;
+				}
+				CompositeInstance compositeInstance = new CompositeInstance(data.m_TypeName)
+				{
+					builtIn = false
+				};
+				if (dictionary2.TryGetValue((binding.actionName, binding.device), out var value2))
+				{
+					compositeInstance.rebindOptions = value2.rebindOptions;
+					compositeInstance.modifierOptions = value2.modifierOptions;
+					compositeInstance.developerOnly = value2.developerOnly;
+					compositeInstance.mode = value2.mode;
+					compositeInstance.usages = value2.usages;
+					compositeInstance.interactions.AddRange(value2.interactions.Select(NameAndParameters.Parse));
+					compositeInstance.processors.AddRange(value2.processors.Select(NameAndParameters.Parse));
+				}
+				else
+				{
+					compositeInstance.rebindOptions = RebindOptions.All;
+					compositeInstance.modifierOptions = ModifierOptions.Allow;
+				}
+				ProxyComposite.Info info2 = default(ProxyComposite.Info);
+				info2.m_Device = binding.device;
+				info2.m_Source = compositeInstance;
+				info2.m_Bindings = new List<ProxyBinding>();
+				item2 = info2;
+				value.Item1.m_Composites.Add(item2);
+			}
+			item2.m_Bindings.Add(binding);
+			dictionary[binding.actionName] = value;
+		}
+		ProxyAction.Info[] actionsToAdd = dictionary.Values.Select<(ProxyAction.Info, List<PropertyInfo>), ProxyAction.Info>(((ProxyAction.Info actionInfo, List<PropertyInfo> properties) d) => d.actionInfo).ToArray();
+		InputManager.instance.AddActions(actionsToAdd);
+		PropertyInfo[] array2 = array;
+		foreach (PropertyInfo property in array2)
+		{
+			ProxyBinding binding2 = (ProxyBinding)property.GetValue(this);
+			binding2.CreateWatcher(delegate(ProxyBinding newBinding)
+			{
+				property.SetValue(this, newBinding);
+			});
+			if (TryGetSourceBindingForMimic(property, binding2.device, binding2.component, out var sourceBinding))
+			{
+				sourceBinding.CreateWatcher(delegate(ProxyBinding newSourceBinding)
+				{
+					ProxyBinding newBinding2 = binding2.Copy();
+					newBinding2.path = newSourceBinding.path;
+					newBinding2.modifiers = newSourceBinding.modifiers;
+					InputManager.instance.SetBinding(newBinding2, out var _);
+				});
+			}
+		}
+		keyBindingRegistered = true;
+	}
+
+	private ProxyBinding CreateBinding(InputManager.DeviceType device, string actionName, ActionType type, ActionComponent component, string control, IEnumerable<string> modifierControls)
+	{
+		if (!InputManager.TryGetCompositeData(type, out var data) || !data.TryGetData(component, out var componentData))
+		{
+			componentData = InputManager.CompositeComponentData.defaultData;
+		}
+		ProxyModifier[] array = modifierControls.Select(delegate(string modifierControl)
+		{
+			ProxyModifier result = default(ProxyModifier);
+			result.m_Component = component;
+			result.m_Name = componentData.m_ModifierName;
+			result.m_Path = modifierControl;
+			return result;
+		}).ToArray();
+		ProxyBinding result2 = new ProxyBinding(id, actionName, component, componentData.m_BindingName, new CompositeInstance(device.ToString()));
+		result2.device = device;
+		result2.path = control;
+		result2.originalPath = control;
+		result2.modifiers = array;
+		result2.originalModifiers = array;
+		return result2;
+	}
+
+	private ProxyBinding CreateMimicBinding(InputManager.DeviceType device, string actionName, ActionType type, ActionComponent component, ProxyBinding sourceBinding)
+	{
+		if (!InputManager.TryGetCompositeData(type, out var data) || !data.TryGetData(component, out var data2))
+		{
+			data2 = InputManager.CompositeComponentData.defaultData;
+		}
+		ProxyBinding result = new ProxyBinding(id, actionName, component, data2.m_BindingName, new CompositeInstance(device.ToString()));
+		result.device = device;
+		result.path = sourceBinding.path;
+		result.originalPath = sourceBinding.originalPath;
+		result.modifiers = sourceBinding.modifiers;
+		result.originalModifiers = sourceBinding.modifiers;
+		return result;
+	}
+
+	[AfterDecode]
+	protected internal void ApplyKeyBindings()
+	{
+		if (keyBindingRegistered)
+		{
+			ProxyBinding[] newBindings = keyBindingProperties.Select((PropertyInfo p) => (ProxyBinding)p.GetValue(this)).ToArray();
+			InputManager.instance.SetBindings(newBindings, out var _);
+		}
+	}
+
+	protected void ResetKeyBindings()
+	{
+		if (keyBindingRegistered)
+		{
+			ProxyBinding[] newBindings = keyBindingProperties.Select(GenerateBinding).ToArray();
+			InputManager.instance.SetBindings(newBindings, out var _);
+			ApplyAndSave();
+		}
+	}
+
+	public ProxyAction GetAction(string name)
+	{
+		return InputManager.instance.FindAction(id, name);
+	}
+
+	public IEnumerable<ProxyAction> GetActions()
+	{
+		if (!InputManager.instance.TryFindActionMap(id, out var map))
+		{
+			return Array.Empty<ProxyAction>();
+		}
+		return map.actions.Values;
+=== [6] LocaleSupport ===
+grep: research/decompiled/Game/Localization/LocaleSupport.cs: No such file or directory

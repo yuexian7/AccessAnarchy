@@ -1,0 +1,33 @@
+FILE decompiled/Game/Modding/ModSetting.cs
+  15: private PropertyInfo[] m_keyBindingProperties;
+  30: public bool keyBindingRegistered { get; private set; }
+  32: private PropertyInfo[] keyBindingProperties => m_keyBindingProperties ?? (m_keyBindingProperties = (from p in GetType().GetProperties(BindingFlags.Instance | Bi
+  43: InitializeKeyBindings();
+  56: private void InitializeKeyBindings()
+  58: PropertyInfo[] array = keyBindingProperties;
+  76: if (((MemberInfo)property).TryGetAttribute(out SettingsUIKeyboardBindingAttribute attribute, inherit: false))
+  141: public void RegisterKeyBindings()
+  143: if (keyBindingRegistered)
+  147: PropertyInfo[] array = keyBindingProperties;
+  228: keyBindingRegistered = true;
+  270: protected internal void ApplyKeyBindings()
+  272: if (keyBindingRegistered)
+  274: ProxyBinding[] newBindings = keyBindingProperties.Select((PropertyInfo p) => (ProxyBinding)p.GetValue(this)).ToArray();
+  279: protected void ResetKeyBindings()
+  281: if (keyBindingRegistered)
+  283: ProxyBinding[] newBindings = keyBindingProperties.Select(GenerateBinding).ToArray();
+FILE decompiled/Game/Settings/InputSettings.cs
+FILE decompiled/Game/Settings/KeybindingSettings.cs
+FILE decompiled/Game/Settings/SettingsUIGamepadBindingAttribute.cs
+FILE decompiled/Game/Settings/SettingsUIKeybindingAttribute.cs
+FILE decompiled/Game/Settings/SettingsUIKeyboardBindingAttribute.cs
+  8: public class SettingsUIKeyboardBindingAttribute : SettingsUIKeybindingAttribute
+  138: public SettingsUIKeyboardBindingAttribute(string actionName = null)
+  143: public SettingsUIKeyboardBindingAttribute(AxisComponent component, string actionName = null)
+  148: public SettingsUIKeyboardBindingAttribute(Vector2Component component, string actionName = null)
+  153: public SettingsUIKeyboardBindingAttribute(BindingKeyboard defaultKey, string actionName = null, bool alt = false, bool ctrl = false, bool shift = false)
+  162: public SettingsUIKeyboardBindingAttribute(BindingKeyboard defaultKey, AxisComponent component, string actionName = null, bool alt = false, bool ctrl = false, bo
+  171: public SettingsUIKeyboardBindingAttribute(BindingKeyboard defaultKey, Vector2Component component, string actionName = null, bool alt = false, bool ctrl = false,
+FILE decompiled/Game/Settings/SettingsUIMouseBindingAttribute.cs
+FILE decompiled/Game/Settings/SharedSettings.cs
+FILE decompiled/Game/UI/Menu/AutomaticSettings.cs

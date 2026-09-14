@@ -4,7 +4,7 @@
 	<!--首发成功（2026-09-12，Unlisted）：ModId 158842。此后重传二进制一律用 PublishNewVersion，别用 Update（会烧版本号）。-->
 	<ModId Value="158842" />
 	<ForumLink Value="https://forum.paradoxplaza.com/forum/threads/access-anarchy.1941285/" />
-	<ModVersion Value="0.6.0" />
+	<ModVersion Value="0.7.0" />
 	<!--线上 requiredVersion 就是这个值；本机游戏 bundleVersion 实测 1.6.0f1（Unity 2022.3.71f1）-->
 	<GameVersion Value="1.6.*" />
 	<AccessLevel Value="Public" />

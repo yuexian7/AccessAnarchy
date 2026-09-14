@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using Colossal;
 using Colossal.IO.AssetDatabase;
+using Game.Input;
 using Game.Modding;
 using Game.SceneFlow;
 using Game.Settings;
@@ -18,12 +19,24 @@ namespace AccessAnarchy
 	[FileLocation(nameof(AccessAnarchy))]
 	[SettingsUIGroupOrder(kGroupMain, kGroupScope)]
 	[SettingsUIShowGroupName(kGroupMain, kGroupScope)]
+	// 两个快捷键动作（官方 InputManager 注册，usages 缺省 = DefaultSet 全集：菜单+游戏内都生效）。
+	// 反编译核实：ModSetting.RegisterKeyBindings 按 [SettingsUIKeyboardBinding] 属性生成
+	// ProxyBinding 并 InputManager.instance.AddActions；map = ModSetting.id（模组自己的 map）。
+	[SettingsUIKeyboardAction(kToggleEnabledAction)]
+	[SettingsUIKeyboardAction(kToggleScopeAction)]
 	public class Setting : ModSetting
 	{
 		public const string kSection = "Main";
 
 		public const string kGroupMain = "Main";
 		public const string kGroupScope = "Scope";
+
+		/// <summary>快捷键动作名：启用/关闭（默认 F3）。</summary>
+		public const string kToggleEnabledAction = "ToggleEnabled";
+
+		/// <summary>快捷键动作名：切换避让范围（默认 F4）。</summary>
+
+		public const string kToggleScopeAction = "ToggleScope";
 
 		/// <summary>作用模式：只处理建筑出入口区域的车道。</summary>
 		public const int kModeAccessOnly = 0;
@@ -96,6 +109,54 @@ namespace AccessAnarchy
 		public bool IsGlobalMode()
 		{
 			return m_Mode == kModeGlobal;
+		}
+
+		/// <summary>启用/关闭快捷键（默认 F3）。玩家改键由框架 KeybindingSettings 持久化。</summary>
+		[SettingsUIKeyboardBinding(BindingKeyboard.F3, kToggleEnabledAction)]
+		public ProxyBinding ToggleEnabledBinding { get; set; }
+
+		/// <summary>切换避让范围快捷键（默认 F4）。</summary>
+		[SettingsUIKeyboardBinding(BindingKeyboard.F4, kToggleScopeAction)]
+		public ProxyBinding ToggleScopeBinding { get; set; }
+
+		/// <summary>热键入口：翻转总开关并落盘。只在主线程（输入事件）调用。</summary>
+		public static void ToggleEnabledFromHotkey()
+		{
+			Setting s = Instance;
+			if (s == null)
+			{
+				return;
+			}
+			s.Enabled = !s.Enabled;
+			try
+			{
+				s.ApplyAndSave();
+			}
+			catch (Exception ex)
+			{
+				AccessAnarchyMod.log.Warn("ToggleEnabledFromHotkey save failed: " + ex);
+			}
+			AccessAnarchyMod.log.Info($"Hotkey: Enabled -> {s.Enabled}");
+		}
+
+		/// <summary>热键入口：在"仅出入口区域"与"全局"之间切换并落盘。</summary>
+		public static void ToggleScopeFromHotkey()
+		{
+			Setting s = Instance;
+			if (s == null)
+			{
+				return;
+			}
+			s.Mode = (s.Mode == kModeAccessOnly) ? kModeGlobal : kModeAccessOnly;
+			try
+			{
+				s.ApplyAndSave();
+			}
+			catch (Exception ex)
+			{
+				AccessAnarchyMod.log.Warn("ToggleScopeFromHotkey save failed: " + ex);
+			}
+			AccessAnarchyMod.log.Info($"Hotkey: Mode -> {(s.Mode == kModeGlobal ? "global" : "access-zones")}");
 		}
 
 		public DropdownItem<int>[] GetModeItems()
@@ -205,7 +266,11 @@ namespace AccessAnarchy
 				{ setting.GetOptionDescLocaleID(nameof(Setting.IncludeConnectionLanes)), d["conn.desc"] },
 
 				{ setting.GetOptionLabelLocaleID(nameof(Setting.IncludeParkingLotLanes)), d["lot.label"] },
-				{ setting.GetOptionDescLocaleID(nameof(Setting.IncludeParkingLotLanes)), d["lot.desc"] }
+				{ setting.GetOptionDescLocaleID(nameof(Setting.IncludeParkingLotLanes)), d["lot.desc"] },
+
+				{ setting.GetBindingKeyLocaleID(Setting.kToggleEnabledAction), d["hotkey.enabled"] },
+				{ setting.GetBindingKeyLocaleID(Setting.kToggleScopeAction), d["hotkey.scope"] },
+				{ setting.GetBindingMapLocaleID(), d["bindingMap"] }
 			};
 		}
 
@@ -248,7 +313,10 @@ namespace AccessAnarchy
 				{ "conn.label", "Building driveways" },
 				{ "conn.desc", "Include the lanes between buildings/terminals and the road network (vehicle and pedestrian connection lanes)." },
 				{ "lot.label", "Parking lots and building-internal lanes" },
-				{ "lot.desc", "Include lanes inside parking lots and other building-owned roads." }
+				{ "lot.desc", "Include lanes inside parking lots and other building-owned roads." },
+				{ "hotkey.enabled", "Enable/disable the mod" },
+				{ "hotkey.scope", "Switch scope mode" },
+				{ "bindingMap", "Access Anarchy key bindings" }
 			};
 		}
 
@@ -272,7 +340,10 @@ namespace AccessAnarchy
 				{ "conn.label", "建筑出入连接道" },
 				{ "conn.desc", "包含建筑/场站与路网之间的连接道（车辆与行人连接道）。" },
 				{ "lot.label", "停车场与建筑内部车道" },
-				{ "lot.desc", "包含停车场内部车道与建筑自有道路。" }
+				{ "lot.desc", "包含停车场内部车道与建筑自有道路。" },
+				{ "hotkey.enabled", "启用/关闭模组" },
+				{ "hotkey.scope", "切换避让范围" },
+				{ "bindingMap", "Access Anarchy 键位" }
 			};
 		}
 
@@ -296,7 +367,10 @@ namespace AccessAnarchy
 				{ "conn.label", "建築出入連接道" },
 				{ "conn.desc", "包含建築/場站與路網之間的連接道（車輛與行人連接道）。" },
 				{ "lot.label", "停車場與建築內部車道" },
-				{ "lot.desc", "包含停車場內部車道與建築自有道路。" }
+				{ "lot.desc", "包含停車場內部車道與建築自有道路。" },
+				{ "hotkey.enabled", "啟用/關閉模組" },
+				{ "hotkey.scope", "切換避讓範圍" },
+				{ "bindingMap", "Access Anarchy 鍵位" }
 			};
 		}
 
@@ -320,7 +394,10 @@ namespace AccessAnarchy
 				{ "conn.label", "Gebäudezufahrten" },
 				{ "conn.desc", "Verbindungsspur zwischen Gebäuden und Straßennetz einschließen (Fahrzeug- und Fußgängerverbindungen)." },
 				{ "lot.label", "Parkplätze und Gebäudeinnenflächen" },
-				{ "lot.desc", "Fahrbahnen innerhalb von Parkplätzen und andere grundstückseigene Straßen einschließen." }
+				{ "lot.desc", "Fahrbahnen innerhalb von Parkplätzen und andere grundstückseigene Straßen einschließen." },
+				{ "hotkey.enabled", "Mod aktivieren/deaktivieren" },
+				{ "hotkey.scope", "Bereichsmodus wechseln" },
+				{ "bindingMap", "Access Anarchy-Tastenkürzel" }
 			};
 		}
 
@@ -344,7 +421,10 @@ namespace AccessAnarchy
 				{ "conn.label", "Accesos a edificios" },
 				{ "conn.desc", "Incluir los carriles entre edificios y la red viaria (conexiones de vehículo y de peatón)." },
 				{ "lot.label", "Aparcamientos y vías internas" },
-				{ "lot.desc", "Incluir los carriles dentro de aparcamientos y otras vías propias de los edificios." }
+				{ "lot.desc", "Incluir los carriles dentro de aparcamientos y otras vías propias de los edificios." },
+				{ "hotkey.enabled", "Activar/desactivar el mod" },
+				{ "hotkey.scope", "Cambiar modo de alcance" },
+				{ "bindingMap", "Atajos de Access Anarchy" }
 			};
 		}
 
@@ -368,7 +448,10 @@ namespace AccessAnarchy
 				{ "conn.label", "Accès aux bâtiments" },
 				{ "conn.desc", "Inclure les voies entre les bâtiments et le réseau routier (connexions véhicules et piétons)." },
 				{ "lot.label", "Parkings et voies internes" },
-				{ "lot.desc", "Inclure les voies à l'intérieur des parkings et autres routes privées des bâtiments." }
+				{ "lot.desc", "Inclure les voies à l'intérieur des parkings et autres routes privées des bâtiments." },
+				{ "hotkey.enabled", "Activer/désactiver le mod" },
+				{ "hotkey.scope", "Changer le mode de portée" },
+				{ "bindingMap", "Raccourcis d'Access Anarchy" }
 			};
 		}
 
@@ -392,7 +475,10 @@ namespace AccessAnarchy
 				{ "conn.label", "Accessi agli edifici" },
 				{ "conn.desc", "Includi le corsie tra edifici e rete stradale (connessioni veicoli e pedoni)." },
 				{ "lot.label", "Parcheggi e strade interne" },
-				{ "lot.desc", "Includi le corsie all'interno dei parcheggi e le strade private degli edifici." }
+				{ "lot.desc", "Includi le corsie all'interno dei parcheggi e le strade private degli edifici." },
+				{ "hotkey.enabled", "Attiva/disattiva la mod" },
+				{ "hotkey.scope", "Cambia modalità di ambito" },
+				{ "bindingMap", "Scorciatoie di Access Anarchy" }
 			};
 		}
 
@@ -416,7 +502,10 @@ namespace AccessAnarchy
 				{ "conn.label", "建物のアクセス路" },
 				{ "conn.desc", "建物と道路網をつなぐ車線を含めます（車両用・歩行者用の両方）。" },
 				{ "lot.label", "駐車場と敷地内道路" },
-				{ "lot.desc", "駐車場内の車線や建物所有の道路を含めます。" }
+				{ "lot.desc", "駐車場内の車線や建物所有の道路を含めます。" },
+				{ "hotkey.enabled", "Modの有効/無効" },
+				{ "hotkey.scope", "適用範囲の切り替え" },
+				{ "bindingMap", "Access Anarchy のキー割り当て" }
 			};
 		}
 
@@ -440,7 +529,10 @@ namespace AccessAnarchy
 				{ "conn.label", "건물 출입 연결로" },
 				{ "conn.desc", "건물과 도로망 사이의 차선을 포함합니다(차량용 및 보행자용 연결로)." },
 				{ "lot.label", "주차장 및 부지 내 도로" },
-				{ "lot.desc", "주차장 내부 차선과 건물 소유 도로를 포함합니다." }
+				{ "lot.desc", "주차장 내부 차선과 건물 소유 도로를 포함합니다." },
+				{ "hotkey.enabled", "모드 켜기/끄기" },
+				{ "hotkey.scope", "적용 범위 전환" },
+				{ "bindingMap", "Access Anarchy 키 설정" }
 			};
 		}
 
@@ -464,7 +556,10 @@ namespace AccessAnarchy
 				{ "conn.label", "Wjazdy do budynków" },
 				{ "conn.desc", "Uwzględnij pasy między budynkami a siecią drogową (połączenia pojazdowe i piesze)." },
 				{ "lot.label", "Parkingi i drogi wewnętrzne" },
-				{ "lot.desc", "Uwzględnij pasy na parkingach oraz inne drogi należące do budynków." }
+				{ "lot.desc", "Uwzględnij pasy na parkingach oraz inne drogi należące do budynków." },
+				{ "hotkey.enabled", "Włącz/wyłącz mod" },
+				{ "hotkey.scope", "Przełącz tryb zakresu" },
+				{ "bindingMap", "Skróty Access Anarchy" }
 			};
 		}
 
@@ -488,7 +583,10 @@ namespace AccessAnarchy
 				{ "conn.label", "Acessos de edifícios" },
 				{ "conn.desc", "Incluir as faixas entre edifícios e a malha viária (conexões de veículos e de pedestres)." },
 				{ "lot.label", "Estacionamentos e vias internas" },
-				{ "lot.desc", "Incluir faixas dentro de estacionamentos e vias particulares de edifícios." }
+				{ "lot.desc", "Incluir faixas dentro de estacionamentos e vias particulares de edifícios." },
+				{ "hotkey.enabled", "Ativar/desativar o mod" },
+				{ "hotkey.scope", "Alternar modo de escopo" },
+				{ "bindingMap", "Atalhos do Access Anarchy" }
 			};
 		}
 
@@ -512,7 +610,10 @@ namespace AccessAnarchy
 				{ "conn.label", "Въезды к зданиям" },
 				{ "conn.desc", "Включить полосы между зданиями и дорожной сетью (транспортные и пешеходные соединения)." },
 				{ "lot.label", "Парковки и внутренние дороги" },
-				{ "lot.desc", "Включить полосы внутри парковок и другие дороги на территории зданий." }
+				{ "lot.desc", "Включить полосы внутри парковок и другие дороги на территории зданий." },
+				{ "hotkey.enabled", "Включить/выключить мод" },
+				{ "hotkey.scope", "Переключить режим зоны" },
+				{ "bindingMap", "Горячие клавиши Access Anarchy" }
 			};
 		}
 	}

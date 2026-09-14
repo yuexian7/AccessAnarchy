@@ -18,41 +18,40 @@ using UnityEngine.Scripting;
 namespace AccessAnarchy.Systems
 {
 	/// <summary>
-	/// 让车辆在指定范围内不再避让行人（v0.4，双干预点 + 空间判定）。
+	/// 让车辆在指定范围内不再避让行人（v0.7.0，性能重构）。
 	///
-	/// 机制结论（对 Game.dll 1.6.0f1 反编译核实 + 实机日志验证）：
+	/// 机制结论（对 Game.dll 1.6.0f1 反编译核实 + 实机日志验证，详见 开发笔记.md）：
 	/// 车辆"看见"行人的唯一通道是车道的 LaneObject 注册缓冲——CarNavigationSystem 的
 	/// CarLaneSpeedIterator 无论走 CheckCurrentLane（本车道）还是 CheckOverlappingLanes
 	/// （经 LaneOverlap 指向的对端车道），最终都读某个车道的 LaneObject buffer 找行人
 	/// （带 Game.Creatures.Creature 组件）并压低 CarNavigation.m_MaxSpeed。
 	///
-	/// 关键事实（每一条都有实机/反编译证据，见 开发笔记.md）：
-	/// - 连接道（driveway/garage，全部带 SecondaryLane）没有 LaneObject/LaneOverlap buffer，
-	///   CarLaneSpeedIterator 对连接道完全不检查（无 CarLane/PedestrianLane 组件），
-	///   LaneOverlapSystem 也排除 SecondaryLane——连接道自身没有任何可干预数据。
-	/// - 实机日志（v0.3）：registration lanes = 0（连接道/Garage/AreaLane 无 LaneObject
-	///   buffer），而全局模式（删全部车辆车道 overlap）实测有效——所以实机看到的
-	///   "出入口避让"发生在【出入口紧邻的普通马路车道（引道）与行人道的 LaneOverlap】上，
-	///   这类车道是普通 CarLane，按车道类型判定永远覆盖不到。
+	/// v0.6.0 之前的性能问题（57km 地图帧数减半的根因）：
+	/// - 干预点 A 每 4 帧对【全城】车辆车道做 chunk 迭代 + 每条 overlap 条目 2 次组件查找；
+	/// - 干预点 C 每帧对【全城】行人道做 chunk 迭代 + 每实体 Curve 查找 + 3×3 网格查询。
+	///   城市越大车道/行人道越多（大地图几万条），这两处是 O(全城) 的每帧/每4帧扫描。
 	///
-	/// 因此 v0.4 引入空间判定：以连接道/车库坡道/区域车道的曲线控制点为锚点建网格
-	/// （32m 格 + 32m 距离校验），任何【邻近锚点】的车道都视为出入口区域：
-	/// A（每 4 帧）：邻近车道的 LaneOverlap 缓冲删除行人条目（引道↔人行道/横道）。
-	/// B（每帧）：连接道/车库坡道/区域车道的 LaneObjects 删除行人条目（兜底，通常 0 条）。
-	/// C（每帧）：邻近行人道（PedestrianLane）的 LaneObjects 删除行人条目——横穿出入口
-	///     区域的行人无论注册在哪条行人道上都会被摘除，釜底抽薪。
+	/// v0.7.0 优化（行为不变）：
+	/// 1. 邻域集合：把"邻近出入口锚点的行人道/车辆车道"预收进 NativeHashSet（双缓冲），
+	///    分帧增量构建（每帧主链上处理 512 个候选，全城几万条约 1-2 秒完成一轮）。
+	///    A/C 只处理集合内实体——每帧成本从 O(全城) 降到 O(邻域，几百条)。
+	///    构建期间用上一轮集合（新车道最多滞后一轮），双缓冲避免判定空窗。
+	/// 2. C 改为单线程 IJob 直接遍历行人道集合（省掉全城 chunk 迭代）。
+	/// 3. 删除干预点 B（连接道注册删除）——v0.3 实机日志证明连接道没有 LaneObject
+	///    buffer（registration lanes = 0），它是每帧空转的冗余 job。
+	/// 4. 全局模式：A 保持全城扫描（本就有效），C 完全跳过（A 已删掉全部车辆车道
+	///    的行人 overlap 条目，车辆逻辑上再也读不到任何行人道，C 纯冗余）。
 	///
-	/// 干预点 B/C 的重加来源是行人在自己的 1/16 切片帧经 CheckChanges 的 Update 动作
-	/// （UpdateLaneObject 是"有则更新、无则添加"），ECB 在帧末回放、CarNav 帧中读取，
-	/// 所以 B/C 必须每帧执行（任何一帧缺席，CarNav 就会读到重加的行人）。
-	///
-	/// 不碰的东西：车辆与车辆之间的 overlap / 注册条目；远离出入口的行人道上的行人注册
-	/// （马路/横道的正常避让保持原版）。行人的寻路与行走不读取这些数据。
+	/// 保留的语义（与 v0.6.0 完全一致）：
+	/// - 人行横道（PedestrianLaneFlags.Crosswalk）永不处理，横道避让保持原版；
+	/// - 车车 overlap、行人寻路不碰；
+	/// - ECB 帧末回放、CarNav 帧中读取 → C 必须每帧执行（缺席一帧车辆就会看到重加的行人）；
+	/// - A 的重加来源（LaneOverlapSystem 车道重建）频率低，每 4 帧足够。
 	/// </summary>
 	[Preserve]
 	public partial class AccessZoneOverlapSystem : GameSystemBase
 	{
-		/// <summary>干预点 A（overlap 删除）的执行间隔（模拟帧）。B/C 每帧执行。</summary>
+		/// <summary>干预点 A（overlap 删除）的执行间隔（模拟帧）。C 每帧执行。</summary>
 		private const int kInterval = 4;
 
 		/// <summary>锚点网格重建间隔（模拟帧）。连接道集合只在修路/建拆时变化。</summary>
@@ -63,16 +62,30 @@ namespace AccessAnarchy.Systems
 
 		private const float kGridCellSize = 32f;
 
+		/// <summary>每帧在主链上处理的候选实体数（集合分帧构建的步长）。</summary>
+		private const int kSetBuildStep = 512;
+
 		/// <summary>每隔多少个模拟帧输出一次心跳日志（诊断用）。</summary>
 		private const int kHeartbeatInterval = 1800;
 
 		private SimulationSystem m_SimulationSystem;
 		private EndFrameBarrier m_EndFrameBarrier;
 		private EntityQuery m_OverlapQuery;
-		private EntityQuery m_RegistrationQuery;
-		private EntityQuery m_AnchorQuery;
 		private EntityQuery m_PedestrianQuery;
+		private EntityQuery m_AnchorQuery;
+
 		private NativeHashMap<int2, FixedList128Bytes<float2>> m_AnchorGrid;
+
+		/// <summary>邻域集合（双缓冲）：偶数轮 A/B，奇数轮 B/A。Item1 = 活跃（判定用），Item2 = 构建中。</summary>
+		private NativeHashSet<Entity>[] m_PedSets;
+		private NativeHashSet<Entity>[] m_VehicleSets;
+		private int m_ActiveSetIndex;
+
+		/// <summary>分帧构建的候选列表与游标（-1 表示需要重新收集）。</summary>
+		private NativeList<Entity> m_Candidates;
+		private int m_Cursor;
+		private bool m_SetsInitialized;
+
 		private bool m_LoggedFirstRun;
 		private ulong m_TotalPasses;
 
@@ -83,6 +96,18 @@ namespace AccessAnarchy.Systems
 			m_SimulationSystem = World.GetOrCreateSystemManaged<SimulationSystem>();
 			m_EndFrameBarrier = World.GetOrCreateSystemManaged<EndFrameBarrier>();
 			m_AnchorGrid = new NativeHashMap<int2, FixedList128Bytes<float2>>(4096, Allocator.Persistent);
+			m_PedSets = new NativeHashSet<Entity>[2]
+			{
+				new NativeHashSet<Entity>(4096, Allocator.Persistent),
+				new NativeHashSet<Entity>(4096, Allocator.Persistent)
+			};
+			m_VehicleSets = new NativeHashSet<Entity>[2]
+			{
+				new NativeHashSet<Entity>(8192, Allocator.Persistent),
+				new NativeHashSet<Entity>(8192, Allocator.Persistent)
+			};
+			m_Candidates = new NativeList<Entity>(65536, Allocator.Persistent);
+			m_Cursor = -1;
 			m_OverlapQuery = GetEntityQuery(new EntityQueryDesc
 			{
 				All = new ComponentType[1]
@@ -103,17 +128,12 @@ namespace AccessAnarchy.Systems
 					ComponentType.ReadOnly<Temp>()
 				}
 			});
-			m_RegistrationQuery = GetEntityQuery(new EntityQueryDesc
+			m_PedestrianQuery = GetEntityQuery(new EntityQueryDesc
 			{
-				All = new ComponentType[1]
+				All = new ComponentType[2]
 				{
-					ComponentType.ReadOnly<LaneObject>()
-				},
-				Any = new ComponentType[3]
-				{
-					ComponentType.ReadOnly<GarageLane>(),
-					ComponentType.ReadOnly<ConnectionLane>(),
-					ComponentType.ReadOnly<AreaLane>()
+					ComponentType.ReadOnly<LaneObject>(),
+					ComponentType.ReadOnly<PedestrianLane>()
 				},
 				None = new ComponentType[2]
 				{
@@ -139,19 +159,6 @@ namespace AccessAnarchy.Systems
 					ComponentType.ReadOnly<Temp>()
 				}
 			});
-			m_PedestrianQuery = GetEntityQuery(new EntityQueryDesc
-			{
-				All = new ComponentType[2]
-				{
-					ComponentType.ReadOnly<LaneObject>(),
-					ComponentType.ReadOnly<PedestrianLane>()
-				},
-				None = new ComponentType[2]
-				{
-					ComponentType.ReadOnly<Deleted>(),
-					ComponentType.ReadOnly<Temp>()
-				}
-			});
 			RequireForUpdate(m_OverlapQuery);
 		}
 
@@ -160,6 +167,21 @@ namespace AccessAnarchy.Systems
 			if (m_AnchorGrid.IsCreated)
 			{
 				m_AnchorGrid.Dispose();
+			}
+			for (int i = 0; i < 2; i++)
+			{
+				if (m_PedSets[i].IsCreated)
+				{
+					m_PedSets[i].Dispose();
+				}
+				if (m_VehicleSets[i].IsCreated)
+				{
+					m_VehicleSets[i].Dispose();
+				}
+			}
+			if (m_Candidates.IsCreated)
+			{
+				m_Candidates.Dispose();
 			}
 			base.OnDestroy();
 		}
@@ -171,39 +193,44 @@ namespace AccessAnarchy.Systems
 			{
 				return;
 			}
+			bool globalMode = setting.Mode == Setting.kModeGlobal;
 			uint frameIndex = m_SimulationSystem.frameIndex;
 			m_TotalPasses++;
 
 			if (!m_LoggedFirstRun)
 			{
 				m_LoggedFirstRun = true;
-				AccessAnarchyMod.log.Info($"AccessZoneOverlapSystem first pass: {m_OverlapQuery.CalculateEntityCount()} overlap lanes / {m_RegistrationQuery.CalculateEntityCount()} registration lanes / {m_AnchorQuery.CalculateEntityCount()} anchors / {m_PedestrianQuery.CalculateEntityCount()} pedestrian lanes, mode={(setting.Mode == Setting.kModeGlobal ? "global" : "access-zones")}");
+				LogStatus("first pass", globalMode, setting);
 			}
 			else if (m_TotalPasses % kHeartbeatInterval == 0)
 			{
-				AccessAnarchyMod.log.Info($"AccessZoneOverlapSystem heartbeat: pass {m_TotalPasses}, {m_OverlapQuery.CalculateEntityCount()} overlap lanes / {m_RegistrationQuery.CalculateEntityCount()} registration lanes / {m_AnchorQuery.CalculateEntityCount()} anchors / {m_PedestrianQuery.CalculateEntityCount()} pedestrian lanes, mode={(setting.Mode == Setting.kModeGlobal ? "global" : "access-zones")}");
+				LogStatus("heartbeat", globalMode, setting);
 			}
 
 			EntityCommandBuffer.ParallelWriter ecb = m_EndFrameBarrier.CreateCommandBuffer().AsParallelWriter();
 
-			// 锚点网格：低频重建（连接道集合只在修路/建拆时变化）。单线程 IJob，量小。
+			// 锚点网格：低频重建（连接道集合只在修路/建拆时变化）。单线程 job，几千条曲线。
 			if (frameIndex % kGridRebuildInterval == 0)
 			{
-				NativeArray<Entity> anchorEntities = m_AnchorQuery.ToEntityArray(Allocator.TempJob);
 				BuildAnchorGridJob buildJob = new BuildAnchorGridJob
 				{
-					m_Entities = anchorEntities,
+					m_Entities = m_AnchorQuery.ToEntityArray(Allocator.TempJob),
 					m_CurveData = GetComponentLookup<Curve>(isReadOnly: true),
 					m_Grid = m_AnchorGrid
 				};
 				Dependency = buildJob.Schedule(Dependency);
-				anchorEntities.Dispose(Dependency);
 			}
 
-			EntityCommandBuffer.ParallelWriter ecb2 = ecb;
+			if (!globalMode)
+			{
+				// 邻域集合分帧构建（access 模式专属）。每帧处理 kSetBuildStep 个候选；
+				// 一轮完成后交换双缓冲并重新收集候选。构建期间判定用上一轮集合。
+				AdvanceAccessSets(setting);
+			}
 
-			// 干预点 A（overlap 删除）：每 4 帧。重加来源是 LaneOverlapSystem 的车道重建，
-			// 频率低。判定 = 出入口类型车道（原逻辑）或邻近锚点的引道车道（v0.4 空间判定）。
+			// 干预点 A（overlap 删除）：每 4 帧。
+			// access 模式：全城 chunk 迭代但每实体先查集合（一次哈希查询），只有邻域车道才做
+			// overlap 扫描与组件查找；全局模式：全量处理（v0.2 实测有效）。
 			if (frameIndex % kInterval == 0)
 			{
 				StripPedestrianOverlapsJob overlapJob = new StripPedestrianOverlapsJob
@@ -221,58 +248,86 @@ namespace AccessAnarchy.Systems
 					m_ConnectionLaneType = GetComponentTypeHandle<ConnectionLane>(isReadOnly: true),
 					m_AreaLaneType = GetComponentTypeHandle<AreaLane>(isReadOnly: true),
 					m_OverlapType = GetBufferTypeHandle<LaneOverlap>(isReadOnly: true),
-					m_CurveData = GetComponentLookup<Curve>(isReadOnly: true),
-					m_Grid = m_AnchorGrid,
+					m_AccessVehicleSet = m_VehicleSets[m_ActiveSetIndex],
+					m_UseSet = !globalMode,
 					m_Mode = setting.Mode,
 					m_IncludeGarage = setting.IncludeGarageLanes ? 1 : 0,
 					m_IncludeConnections = setting.IncludeConnectionLanes ? 1 : 0,
 					m_IncludeParkingLots = setting.IncludeParkingLotLanes ? 1 : 0,
-					m_Ecb = ecb2
+					m_Ecb = ecb
 				};
 				Dependency = overlapJob.ScheduleParallel(m_OverlapQuery, Dependency);
 			}
 
-			// 干预点 B（行人注册删除，连接道类兜底）：每帧。
-			StripPedestrianRegistrationsJob registrationJob = new StripPedestrianRegistrationsJob
+			// 干预点 C（邻近行人道注册删除）：每帧，仅 access 模式。
+			// 单线程 job 直接遍历行人道集合（几百条），省掉全城 chunk 迭代。
+			// 全局模式跳过：A 已删掉全部车辆车道 overlap 的行人条目，C 纯冗余。
+			if (!globalMode && setting.IncludeConnectionLanes)
 			{
-				m_EntityType = GetEntityTypeHandle(),
-				m_CreatureData = GetComponentLookup<Creature>(isReadOnly: true),
-				m_OwnerData = GetComponentLookup<Owner>(isReadOnly: true),
-				m_EdgeData = GetComponentLookup<Edge>(isReadOnly: true),
-				m_NodeData = GetComponentLookup<Node>(isReadOnly: true),
-				m_CarLaneType = GetComponentTypeHandle<CarLane>(isReadOnly: true),
-				m_ParkingLaneType = GetComponentTypeHandle<ParkingLane>(isReadOnly: true),
-				m_GarageLaneType = GetComponentTypeHandle<GarageLane>(isReadOnly: true),
-				m_ConnectionLaneType = GetComponentTypeHandle<ConnectionLane>(isReadOnly: true),
-				m_AreaLaneType = GetComponentTypeHandle<AreaLane>(isReadOnly: true),
-				m_LaneObjectType = GetBufferTypeHandle<LaneObject>(isReadOnly: true),
-				m_CurveData = GetComponentLookup<Curve>(isReadOnly: true),
-				m_Grid = m_AnchorGrid,
-				m_Mode = setting.Mode,
-				m_IncludeGarage = setting.IncludeGarageLanes ? 1 : 0,
-				m_IncludeConnections = setting.IncludeConnectionLanes ? 1 : 0,
-				m_IncludeParkingLots = setting.IncludeParkingLotLanes ? 1 : 0,
-				m_Ecb = ecb2
-			};
-			Dependency = registrationJob.ScheduleParallel(m_RegistrationQuery, Dependency);
-
-			// 干预点 C（行人注册删除，邻近行人道）：每帧。横穿出入口区域的行人无论注册在
-			// 哪条行人道上都会被摘除，车辆经任何路径都读不到。人行横道（Crosswalk flag）例外。
-			StripPedestrianOnNearbyWalkwaysJob walkwayJob = new StripPedestrianOnNearbyWalkwaysJob
-			{
-				m_EntityType = GetEntityTypeHandle(),
-				m_CreatureData = GetComponentLookup<Creature>(isReadOnly: true),
-				m_PedestrianLaneData = GetComponentLookup<PedestrianLane>(isReadOnly: true),
-				m_LaneObjectType = GetBufferTypeHandle<LaneObject>(isReadOnly: true),
-				m_CurveData = GetComponentLookup<Curve>(isReadOnly: true),
-				m_Grid = m_AnchorGrid,
-				m_IncludeConnections = setting.IncludeConnectionLanes ? 1 : 0,
-				m_Mode = setting.Mode,
-				m_Ecb = ecb2
-			};
-			Dependency = walkwayJob.ScheduleParallel(m_PedestrianQuery, Dependency);
+				StripPedestrianOnNearbyWalkwaysJob walkwayJob = new StripPedestrianOnNearbyWalkwaysJob
+				{
+					m_Set = m_PedSets[m_ActiveSetIndex],
+					m_PedestrianLaneData = GetComponentLookup<PedestrianLane>(isReadOnly: true),
+					m_CreatureData = GetComponentLookup<Creature>(isReadOnly: true),
+					m_LaneObjects = GetBufferLookup<LaneObject>(isReadOnly: false),
+					m_Ecb = m_EndFrameBarrier.CreateCommandBuffer()
+				};
+				Dependency = walkwayJob.Schedule(Dependency);
+			}
 
 			m_EndFrameBarrier.AddJobHandleForProducer(Dependency);
+		}
+
+		private void LogStatus(string tag, bool globalMode, Setting setting)
+		{
+			AccessAnarchyMod.log.Info($"AccessZoneOverlapSystem {tag}: pass {m_TotalPasses}, {m_OverlapQuery.CalculateEntityCount()} overlap lanes / {m_PedestrianQuery.CalculateEntityCount()} ped lanes / {m_AnchorQuery.CalculateEntityCount()} anchors / vehicle set {m_VehicleSets[m_ActiveSetIndex].Count} / ped set {m_PedSets[m_ActiveSetIndex].Count}, mode={(globalMode ? "global" : "access-zones")}");
+		}
+
+		/// <summary>
+		/// 邻域集合的分帧构建。每帧处理 kSetBuildStep 个候选；一轮结束后交换双缓冲
+		/// （构建集 ↔ 活跃集）并重新收集候选。首帧构建期间活跃集为空 = 短暂原版行为。
+		/// </summary>
+		private void AdvanceAccessSets(Setting setting)
+		{
+			if (m_Cursor < 0 || m_Cursor >= m_Candidates.Length)
+			{
+				// 一轮结束：交换双缓冲，构建集变活跃集；清空新构建集开始下一轮。
+				if (m_SetsInitialized)
+				{
+					m_ActiveSetIndex = 1 - m_ActiveSetIndex;
+				}
+				m_SetsInitialized = true;
+				int buildIndex = 1 - m_ActiveSetIndex;
+				m_PedSets[buildIndex].Clear();
+				m_VehicleSets[buildIndex].Clear();
+
+				// 收集候选需完成在途 job（ECB 回放可能移动 chunk）。
+				Dependency.Complete();
+				m_Candidates.Clear();
+				m_Candidates.AddRange(m_PedestrianQuery.ToEntityArray(Allocator.Temp));
+				m_Candidates.AddRange(m_OverlapQuery.ToEntityArray(Allocator.Temp));
+				m_Cursor = 0;
+				AccessAnarchyMod.log.Info($"AccessZoneOverlapSystem set rebuild: {m_Candidates.Length} candidates, active sets now ped={m_PedSets[m_ActiveSetIndex].Count} vehicle={m_VehicleSets[m_ActiveSetIndex].Count}");
+			}
+
+			int endIndex = math.min(m_Cursor + kSetBuildStep, m_Candidates.Length);
+			if (endIndex <= m_Cursor)
+			{
+				return;
+			}
+			BuildAccessSetsJob job = new BuildAccessSetsJob
+			{
+				m_Candidates = m_Candidates,
+				m_Start = m_Cursor,
+				m_End = endIndex,
+				m_CurveData = GetComponentLookup<Curve>(isReadOnly: true),
+				m_PedestrianLaneData = GetComponentLookup<PedestrianLane>(isReadOnly: true),
+				m_Grid = m_AnchorGrid,
+				m_BuildPedSet = m_PedSets[1 - m_ActiveSetIndex],
+				m_BuildVehicleSet = m_VehicleSets[1 - m_ActiveSetIndex]
+			};
+			Dependency = job.Schedule(Dependency);
+			m_Cursor = endIndex;
 		}
 
 		private static int2 GridKey(float3 position)
@@ -280,10 +335,9 @@ namespace AccessAnarchy.Systems
 			return (int2)math.floor(position.xz / kGridCellSize);
 		}
 
-		/// <summary>车道（curve）是否邻近任何出入口锚点（3×3 邻域 + 距离校验）。</summary>
-		private static bool IsNearAnchor(Curve curve, NativeHashMap<int2, FixedList128Bytes<float2>> grid)
+		/// <summary>曲线是否邻近任何出入口锚点（端点+中点的 3×3 邻域 + 距离校验）。</summary>
+		private static bool IsNearAnchor(Bezier4x3 bezier, NativeHashMap<int2, FixedList128Bytes<float2>> grid)
 		{
-			Bezier4x3 bezier = curve.m_Bezier;
 			if (IsNearAnchor(bezier.a, grid) || IsNearAnchor(bezier.d, grid) || IsNearAnchor(0.5f * (bezier.a + bezier.d), grid))
 			{
 				return true;
@@ -315,7 +369,7 @@ namespace AccessAnarchy.Systems
 			return false;
 		}
 
-		private static bool IsAccessLane(int mode, int includeGarage, int includeConnections, int includeParkingLots,
+		private static bool IsAccessLaneByType(int mode, int includeGarage, int includeConnections, int includeParkingLots,
 			bool chunkHasCarLane, bool chunkHasParking, bool chunkHasGarage, bool chunkHasConnection, bool chunkHasArea,
 			NativeArray<ConnectionLane> connectionArray, int i, Entity lane, ComponentLookup<Owner> ownerData,
 			ComponentLookup<Edge> edgeData, ComponentLookup<Node> nodeData)
@@ -338,7 +392,6 @@ namespace AccessAnarchy.Systems
 			}
 			if (includeConnections != 0 && chunkHasConnection)
 			{
-				// 不按 flags 过滤：车辆连接道与行人连接道都处理。
 				return true;
 			}
 			if (includeParkingLots != 0 && chunkHasArea)
@@ -369,6 +422,7 @@ namespace AccessAnarchy.Systems
 		private struct BuildAnchorGridJob : IJob
 		{
 			[ReadOnly]
+			[DeallocateOnJobCompletion]
 			public NativeArray<Entity> m_Entities;
 
 			[ReadOnly]
@@ -410,6 +464,66 @@ namespace AccessAnarchy.Systems
 			}
 		}
 
+		/// <summary>分帧构建邻域集合：候选中邻近锚点的行人道/车辆车道分别入集。</summary>
+		[BurstCompile]
+		private struct BuildAccessSetsJob : IJob
+		{
+			[ReadOnly]
+			public NativeList<Entity> m_Candidates;
+
+			public int m_Start;
+
+			public int m_End;
+
+			[ReadOnly]
+			public ComponentLookup<Curve> m_CurveData;
+
+			[ReadOnly]
+			public ComponentLookup<PedestrianLane> m_PedestrianLaneData;
+
+			[ReadOnly]
+			public NativeHashMap<int2, FixedList128Bytes<float2>> m_Grid;
+
+			public NativeHashSet<Entity> m_BuildPedSet;
+
+			public NativeHashSet<Entity> m_BuildVehicleSet;
+
+			public void Execute()
+			{
+				int end = math.min(m_End, m_Candidates.Length);
+				for (int i = m_Start; i < end; i++)
+				{
+					Entity lane = m_Candidates[i];
+					if (!m_CurveData.TryGetComponent(lane, out Curve curve) || !IsNearAnchor(curve.m_Bezier, m_Grid))
+					{
+						continue;
+					}
+					if (m_PedestrianLaneData.HasComponent(lane))
+					{
+						m_BuildPedSet.Add(lane);
+					}
+					else
+					{
+						m_BuildVehicleSet.Add(lane);
+					}
+				}
+			}
+
+			private static bool IsNearAnchor(Bezier4x3 bezier, NativeHashMap<int2, FixedList128Bytes<float2>> grid)
+			{
+				if (AccessZoneOverlapSystem.IsNearAnchor(bezier.a, grid) || AccessZoneOverlapSystem.IsNearAnchor(bezier.d, grid)
+					|| AccessZoneOverlapSystem.IsNearAnchor(0.5f * (bezier.a + bezier.d), grid))
+				{
+					return true;
+				}
+				return false;
+			}
+		}
+
+		/// <summary>
+		/// 干预点 A：删除车辆车道 LaneOverlap 缓冲中指向行人道的条目。
+		/// access 模式下先用邻域集合过滤（一次哈希查询），仅邻域车道进入逐条扫描。
+		/// </summary>
 		[BurstCompile]
 		private struct StripPedestrianOverlapsJob : IJobChunk
 		{
@@ -453,10 +567,9 @@ namespace AccessAnarchy.Systems
 			public BufferTypeHandle<LaneOverlap> m_OverlapType;
 
 			[ReadOnly]
-			public ComponentLookup<Curve> m_CurveData;
+			public NativeHashSet<Entity> m_AccessVehicleSet;
 
-			[ReadOnly]
-			public NativeHashMap<int2, FixedList128Bytes<float2>> m_Grid;
+			public bool m_UseSet;
 
 			public int m_Mode;
 
@@ -486,13 +599,20 @@ namespace AccessAnarchy.Systems
 				for (int i = 0; i < chunk.Count; i++)
 				{
 					Entity lane = entities[i];
-					bool isAccess = IsAccessLane(m_Mode, m_IncludeGarage, m_IncludeConnections, m_IncludeParkingLots,
-						chunkHasCarLane, chunkHasParking, chunkHasGarage, chunkHasConnection, chunkHasArea,
-						connectionArray, i, lane, m_OwnerData, m_EdgeData, m_NodeData);
-					if (!isAccess && m_IncludeConnections != 0 && chunkHasCarLane && m_CurveData.TryGetComponent(lane, out Curve curve))
+					bool isAccess;
+					if (m_Mode == Setting.kModeGlobal)
 					{
-						// v0.4 空间判定：出入口连接道邻近的普通车道（引道/紧邻横道）也算出入口区域。
-						isAccess = IsNearAnchor(curve, m_Grid);
+						isAccess = IsAccessLaneByType(m_Mode, m_IncludeGarage, m_IncludeConnections, m_IncludeParkingLots,
+							chunkHasCarLane, chunkHasParking, chunkHasGarage, chunkHasConnection, chunkHasArea,
+							connectionArray, i, lane, m_OwnerData, m_EdgeData, m_NodeData);
+					}
+					else
+					{
+						// access 模式：类型判定（车库/连接道/区域车道/建筑自有）或邻域集合成员（引道）。
+						isAccess = IsAccessLaneByType(m_Mode, m_IncludeGarage, m_IncludeConnections, m_IncludeParkingLots,
+							chunkHasCarLane, chunkHasParking, chunkHasGarage, chunkHasConnection, chunkHasArea,
+							connectionArray, i, lane, m_OwnerData, m_EdgeData, m_NodeData)
+							|| (m_IncludeConnections != 0 && m_AccessVehicleSet.Contains(lane));
 					}
 					if (!isAccess)
 					{
@@ -530,8 +650,7 @@ namespace AccessAnarchy.Systems
 			{
 				if (m_PedestrianLaneData.TryGetComponent(other, out PedestrianLane ped))
 				{
-					// 人行横道（Crosswalk flag）不删：横道上的正常车让人行为必须保持原版
-					// （出入口与人行横道在城市里经常紧邻，v0.4 的空间判定曾把横道一起吃掉）。
+					// 人行横道（Crosswalk flag）不删：横道上的正常车让人行为必须保持原版。
 					if ((ped.m_Flags & PedestrianLaneFlags.Crosswalk) != 0)
 					{
 						return false;
@@ -548,171 +667,40 @@ namespace AccessAnarchy.Systems
 			}
 		}
 
-		/// <summary>干预点 B：删除出入口类型车道 LaneObject 注册缓冲里的行人与动物条目（兜底）。</summary>
-		[BurstCompile]
-		private struct StripPedestrianRegistrationsJob : IJobChunk
-		{
-			[ReadOnly]
-			public EntityTypeHandle m_EntityType;
-
-			[ReadOnly]
-			public ComponentLookup<Creature> m_CreatureData;
-
-			[ReadOnly]
-			public ComponentLookup<Owner> m_OwnerData;
-
-			[ReadOnly]
-			public ComponentLookup<Edge> m_EdgeData;
-
-			[ReadOnly]
-			public ComponentLookup<Node> m_NodeData;
-
-			[ReadOnly]
-			public ComponentTypeHandle<CarLane> m_CarLaneType;
-
-			[ReadOnly]
-			public ComponentTypeHandle<ParkingLane> m_ParkingLaneType;
-
-			[ReadOnly]
-			public ComponentTypeHandle<GarageLane> m_GarageLaneType;
-
-			[ReadOnly]
-			public ComponentTypeHandle<ConnectionLane> m_ConnectionLaneType;
-
-			[ReadOnly]
-			public ComponentTypeHandle<AreaLane> m_AreaLaneType;
-
-			[ReadOnly]
-			public BufferTypeHandle<LaneObject> m_LaneObjectType;
-
-			[ReadOnly]
-			public ComponentLookup<Curve> m_CurveData;
-
-			[ReadOnly]
-			public NativeHashMap<int2, FixedList128Bytes<float2>> m_Grid;
-
-			public int m_Mode;
-
-			public int m_IncludeGarage;
-
-			public int m_IncludeConnections;
-
-			public int m_IncludeParkingLots;
-
-			public EntityCommandBuffer.ParallelWriter m_Ecb;
-
-			public void Execute(in ArchetypeChunk chunk, int unfilteredChunkIndex, bool useEnabledMask, in v128 chunkEnabledMask)
-			{
-				bool chunkHasCarLane = chunk.Has(ref m_CarLaneType);
-				bool chunkHasParking = chunk.Has(ref m_ParkingLaneType);
-				bool chunkHasGarage = chunk.Has(ref m_GarageLaneType);
-				bool chunkHasConnection = chunk.Has(ref m_ConnectionLaneType);
-				bool chunkHasArea = chunk.Has(ref m_AreaLaneType);
-				if (!chunkHasCarLane && !chunkHasParking && !chunkHasGarage && !chunkHasConnection && !chunkHasArea)
-				{
-					return;
-				}
-				NativeArray<Entity> entities = chunk.GetNativeArray(m_EntityType);
-				BufferAccessor<LaneObject> laneObjects = chunk.GetBufferAccessor(ref m_LaneObjectType);
-				NativeArray<ConnectionLane> connectionArray = chunkHasConnection ? chunk.GetNativeArray(ref m_ConnectionLaneType) : default;
-
-				for (int i = 0; i < chunk.Count; i++)
-				{
-					Entity lane = entities[i];
-					if (!IsAccessLane(m_Mode, m_IncludeGarage, m_IncludeConnections, m_IncludeParkingLots,
-						chunkHasCarLane, chunkHasParking, chunkHasGarage, chunkHasConnection, chunkHasArea,
-						connectionArray, i, lane, m_OwnerData, m_EdgeData, m_NodeData))
-					{
-						continue;
-					}
-					Strip(lane, laneObjects[i], unfilteredChunkIndex, m_Ecb);
-				}
-			}
-
-			private void Strip(Entity lane, DynamicBuffer<LaneObject> buffer, int sortKey, EntityCommandBuffer.ParallelWriter ecb)
-			{
-				bool has = false;
-				for (int i = 0; i < buffer.Length; i++)
-				{
-					if (m_CreatureData.HasComponent(buffer[i].m_LaneObject))
-					{
-						has = true;
-						break;
-					}
-				}
-				if (!has)
-				{
-					return;
-				}
-				DynamicBuffer<LaneObject> replacement = ecb.SetBuffer<LaneObject>(sortKey, lane);
-				for (int j = 0; j < buffer.Length; j++)
-				{
-					if (!m_CreatureData.HasComponent(buffer[j].m_LaneObject))
-					{
-						replacement.Add(buffer[j]);
-					}
-				}
-			}
-		}
-
 		/// <summary>
-		/// 干预点 C：删除出入口锚点邻近行人道的行人注册。横穿出入口区域的行人无论注册在
-		/// 人行道还是横道上都会被摘除，车辆经任何路径（本车道/overlap 对端）都读不到。
-		/// 人行横道（Crosswalk flag）例外——横道上的正常避让保持原版。
+		/// 干预点 C：删除邻域行人道的行人注册（每帧，access 模式）。
+		/// 人行横道（Crosswalk flag）整条跳过——横道上的行人注册保持原样，车辆继续让行。
 		/// </summary>
 		[BurstCompile]
-		private struct StripPedestrianOnNearbyWalkwaysJob : IJobChunk
+		private struct StripPedestrianOnNearbyWalkwaysJob : IJob
 		{
 			[ReadOnly]
-			public EntityTypeHandle m_EntityType;
-
-			[ReadOnly]
-			public ComponentLookup<Creature> m_CreatureData;
+			public NativeHashSet<Entity> m_Set;
 
 			[ReadOnly]
 			public ComponentLookup<PedestrianLane> m_PedestrianLaneData;
 
 			[ReadOnly]
-			public BufferTypeHandle<LaneObject> m_LaneObjectType;
+			public ComponentLookup<Creature> m_CreatureData;
 
 			[ReadOnly]
-			public ComponentLookup<Curve> m_CurveData;
+			public BufferLookup<LaneObject> m_LaneObjects;
 
-			[ReadOnly]
-			public NativeHashMap<int2, FixedList128Bytes<float2>> m_Grid;
+			public EntityCommandBuffer m_Ecb;
 
-			public int m_IncludeConnections;
-
-			public int m_Mode;
-
-			public EntityCommandBuffer.ParallelWriter m_Ecb;
-
-			public void Execute(in ArchetypeChunk chunk, int unfilteredChunkIndex, bool useEnabledMask, in v128 chunkEnabledMask)
+			public void Execute()
 			{
-				if (m_IncludeConnections == 0 && m_Mode != Setting.kModeGlobal)
+				foreach (Entity lane in m_Set)
 				{
-					return;
-				}
-				NativeArray<Entity> entities = chunk.GetNativeArray(m_EntityType);
-				BufferAccessor<LaneObject> laneObjects = chunk.GetBufferAccessor(ref m_LaneObjectType);
-
-				for (int i = 0; i < chunk.Count; i++)
-				{
-					Entity lane = entities[i];
-					// 人行横道例外：横道上的行人注册保持原样，车辆继续让行。
 					if (m_PedestrianLaneData.TryGetComponent(lane, out PedestrianLane ped)
 						&& (ped.m_Flags & PedestrianLaneFlags.Crosswalk) != 0)
 					{
 						continue;
 					}
-					if (m_Mode != Setting.kModeGlobal)
+					if (!m_LaneObjects.TryGetBuffer(lane, out DynamicBuffer<LaneObject> buffer) || buffer.Length == 0)
 					{
-						if (!m_CurveData.TryGetComponent(lane, out Curve curve) || !IsNearAnchor(curve, m_Grid))
-						{
-							continue;
-						}
+						continue;
 					}
-					DynamicBuffer<LaneObject> buffer = laneObjects[i];
 					bool has = false;
 					for (int j = 0; j < buffer.Length; j++)
 					{
@@ -726,7 +714,7 @@ namespace AccessAnarchy.Systems
 					{
 						continue;
 					}
-					DynamicBuffer<LaneObject> replacement = m_Ecb.SetBuffer<LaneObject>(unfilteredChunkIndex, lane);
+					DynamicBuffer<LaneObject> replacement = m_Ecb.SetBuffer<LaneObject>(lane);
 					for (int j = 0; j < buffer.Length; j++)
 					{
 						if (!m_CreatureData.HasComponent(buffer[j].m_LaneObject))

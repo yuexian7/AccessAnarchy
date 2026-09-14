@@ -1,9 +1,11 @@
 using Colossal.Logging;
 using Game;
+using Game.Input;
 using Game.Modding;
 using Game.SceneFlow;
 using Game.Simulation;
 using AccessAnarchy.Systems;
+using UnityEngine.InputSystem;
 
 namespace AccessAnarchy
 {
@@ -21,7 +23,7 @@ namespace AccessAnarchy
 
 		public void OnLoad(UpdateSystem updateSystem)
 		{
-			log.Info("Access Anarchy v0.6.0 loading (zero-Harmony ECS data editing)...");
+			log.Info("Access Anarchy v0.7.0 loading (zero-Harmony ECS data editing)...");
 			if (GameManager.instance.modManager.TryGetExecutableAsset(this, out var asset))
 			{
 				log.Info($"Current mod asset at {asset.path}");
@@ -39,8 +41,21 @@ namespace AccessAnarchy
 				GameManager.instance.localizationManager.AddSource(locales[i], new LocaleSource(m_Setting, locales[i]));
 			}
 
-			// 从 ModsSettings\AccessAnarchy.coc 读取玩家上次保存的设置。
+			// 从 ModsSettings\AccessAnarchy.coc 读取玩家上次保存的设置（含改过的键位——
+			// LoadSettings 必须先于 RegisterKeyBindings，玩家改的键才能在特性默认键之前恢复）。
 			Colossal.IO.AssetDatabase.AssetDatabase.global.LoadSettings(nameof(AccessAnarchy), m_Setting, new Setting(this));
+
+			// 注册快捷键（F3=启用/关闭，F4=切换避让范围）。官方路线：
+			// RegisterKeyBindings 把 [SettingsUIKeyboardAction]/[SettingsUIKeyboardBinding]
+			// 声明的动作挂进 InputManager（map = 模组 id），onInteraction 在按下沿触发。
+			m_Setting.RegisterKeyBindings();
+			ProxyAction toggleEnabled = m_Setting.GetAction(Setting.kToggleEnabledAction);
+			toggleEnabled.shouldBeEnabled = true;
+			toggleEnabled.onInteraction += OnToggleEnabledInteraction;
+			ProxyAction toggleScope = m_Setting.GetAction(Setting.kToggleScopeAction);
+			toggleScope.shouldBeEnabled = true;
+			toggleScope.onInteraction += OnToggleScopeInteraction;
+			log.Info("Hotkeys registered: F3=enable/disable, F4=scope mode");
 
 			// 注册到模拟主循环，并强制排在 CarNavigationSystem 之前：
 			// CarNavigationSystem 每帧读取 LaneOverlap / LaneObject 决定避让，我们删完它才读；
@@ -50,6 +65,24 @@ namespace AccessAnarchy
 			updateSystem.UpdateBefore<AccessZoneOverlapSystem, CarNavigationSystem>(SystemUpdatePhase.GameSimulation);
 
 			log.Info("Access Anarchy loaded: AccessZoneOverlapSystem registered in GameSimulation before CarNavigationSystem.");
+		}
+
+		private static void OnToggleEnabledInteraction(ProxyAction action, InputActionPhase phase)
+		{
+			if (phase != InputActionPhase.Started)
+			{
+				return;
+			}
+			Setting.ToggleEnabledFromHotkey();
+		}
+
+		private static void OnToggleScopeInteraction(ProxyAction action, InputActionPhase phase)
+		{
+			if (phase != InputActionPhase.Started)
+			{
+				return;
+			}
+			Setting.ToggleScopeFromHotkey();
 		}
 
 		public void OnDispose()

@@ -1,12 +1,15 @@
 using System;
 using System.Runtime.CompilerServices;
+using Colossal.Collections;
 using Colossal.Mathematics;
 using Game;
 using Game.Common;
 using Game.Creatures;
 using Game.Net;
+using Game.Objects;
 using Game.Simulation;
 using Game.Tools;
+using Game.Vehicles;
 using Unity.Burst;
 using Unity.Burst.Intrinsics;
 using Unity.Collections;
@@ -73,6 +76,10 @@ namespace AccessAnarchy.Systems
 		private EntityQuery m_OverlapQuery;
 		private EntityQuery m_PedestrianQuery;
 		private EntityQuery m_AnchorQuery;
+		private Game.Objects.SearchSystem m_ObjectSearchSystem;
+
+		/// <summary>踉跄中行人 → 到期模拟帧。开启撞击反馈时使用；到期由 RemoveStumblingJob 移除。</summary>
+		private NativeHashMap<Entity, uint> m_StumblingUntil;
 
 		private NativeHashMap<int2, FixedList128Bytes<float2>> m_AnchorGrid;
 
@@ -95,6 +102,8 @@ namespace AccessAnarchy.Systems
 			base.OnCreate();
 			m_SimulationSystem = World.GetOrCreateSystemManaged<SimulationSystem>();
 			m_EndFrameBarrier = World.GetOrCreateSystemManaged<EndFrameBarrier>();
+			m_ObjectSearchSystem = World.GetOrCreateSystemManaged<Game.Objects.SearchSystem>();
+			m_StumblingUntil = new NativeHashMap<Entity, uint>(1024, Allocator.Persistent);
 			m_AnchorGrid = new NativeHashMap<int2, FixedList128Bytes<float2>>(4096, Allocator.Persistent);
 			m_PedSets = new NativeHashSet<Entity>[2]
 			{
@@ -183,6 +192,10 @@ namespace AccessAnarchy.Systems
 			{
 				m_Candidates.Dispose();
 			}
+			if (m_StumblingUntil.IsCreated)
+			{
+				m_StumblingUntil.Dispose();
+			}
 			base.OnDestroy();
 		}
 
@@ -259,10 +272,32 @@ namespace AccessAnarchy.Systems
 				Dependency = overlapJob.ScheduleParallel(m_OverlapQuery, Dependency);
 			}
 
-			// 干预点 C（邻近行人道注册删除）：每帧，仅 access 模式。
-			// 单线程 job 直接遍历行人道集合（几百条），省掉全城 chunk 迭代。
-			// 全局模式跳过：A 已删掉全部车辆车道 overlap 的行人条目，C 纯冗余。
-			if (!globalMode && setting.IncludeConnectionLanes)
+			// 撞击反馈（可选）：被车辆穿过时行人进入原生 Stumbling 踉跄状态，240 帧后由
+			// RemoveStumblingJob 移除（游戏内没有任何系统会移除 Stumbling——反编译核实，
+			// 原生 Impact 链靠销毁行人结束踉跄，我们必须自己管理生命周期）。
+			bool bloodEffects = setting.BloodEffects;
+			EntityCommandBuffer ecbMain = m_EndFrameBarrier.CreateCommandBuffer();
+			if (bloodEffects)
+			{
+				// 不读 Count（job 在途时主线程读它是数据竞争）；map 为空时 job 内 O(1) 早退。
+				RemoveStumblingJob removeJob = new RemoveStumblingJob
+				{
+					m_Until = m_StumblingUntil,
+					m_Frame = frameIndex,
+					m_Ecb = ecbMain
+				};
+				Dependency = removeJob.Schedule(Dependency);
+			}
+
+			// 干预点 C（邻近行人道注册删除 + 穿过检测）：每帧。
+			// 删除仅在 access 模式需要（全局模式 A 已全覆盖）；穿过检测两种模式都做，
+			// 但只覆盖出入口邻域（检测依赖邻域行人道集合）。
+			if (!globalMode || bloodEffects)
+			{
+				AdvanceAccessSets(setting);
+			}
+
+			if (!globalMode || bloodEffects)
 			{
 				StripPedestrianOnNearbyWalkwaysJob walkwayJob = new StripPedestrianOnNearbyWalkwaysJob
 				{
@@ -270,9 +305,19 @@ namespace AccessAnarchy.Systems
 					m_PedestrianLaneData = GetComponentLookup<PedestrianLane>(isReadOnly: true),
 					m_CreatureData = GetComponentLookup<Creature>(isReadOnly: true),
 					m_LaneObjects = GetBufferLookup<LaneObject>(isReadOnly: false),
-					m_Ecb = m_EndFrameBarrier.CreateCommandBuffer()
+					m_Ecb = ecbMain,
+					m_DoStrip = !globalMode,
+					m_BloodEffects = bloodEffects,
+					m_Frame = frameIndex,
+					m_TransformData = GetComponentLookup<Game.Objects.Transform>(isReadOnly: true),
+					m_HumanData = GetComponentLookup<Human>(isReadOnly: true),
+					m_VehicleData = GetComponentLookup<Vehicle>(isReadOnly: true),
+					m_ParkedCarData = GetComponentLookup<ParkedCar>(isReadOnly: true),
+					m_StumblingData = GetComponentLookup<Stumbling>(isReadOnly: true),
+					m_MovingSearchTree = m_ObjectSearchSystem.GetMovingSearchTree(readOnly: true, out JobHandle treeDeps),
+					m_StumblingUntil = m_StumblingUntil
 				};
-				Dependency = walkwayJob.Schedule(Dependency);
+				Dependency = walkwayJob.Schedule(JobHandle.CombineDependencies(Dependency, treeDeps));
 			}
 
 			m_EndFrameBarrier.AddJobHandleForProducer(Dependency);
@@ -668,7 +713,10 @@ namespace AccessAnarchy.Systems
 		}
 
 		/// <summary>
-		/// 干预点 C：删除邻域行人道的行人注册（每帧，access 模式）。
+		/// 干预点 C：删除邻域行人道的行人注册（每帧，access 模式），并（可选）检测
+		/// "车辆正在穿过行人"——行人 1.5m 内存在移动车辆时给行人加原生 Stumbling 踉跄
+		/// 组件（240 帧后由 RemoveStumblingJob 移除；游戏内无任何系统移除 Stumbling，
+		/// 原生 Impact 链靠销毁行人结束踉跄，生命周期必须自管）。
 		/// 人行横道（Crosswalk flag）整条跳过——横道上的行人注册保持原样，车辆继续让行。
 		/// </summary>
 		[BurstCompile]
@@ -688,6 +736,32 @@ namespace AccessAnarchy.Systems
 
 			public EntityCommandBuffer m_Ecb;
 
+			public bool m_DoStrip;
+
+			public bool m_BloodEffects;
+
+			public uint m_Frame;
+
+			[ReadOnly]
+			public ComponentLookup<Game.Objects.Transform> m_TransformData;
+
+			[ReadOnly]
+			public ComponentLookup<Human> m_HumanData;
+
+			[ReadOnly]
+			public ComponentLookup<Vehicle> m_VehicleData;
+
+			[ReadOnly]
+			public ComponentLookup<ParkedCar> m_ParkedCarData;
+
+			[ReadOnly]
+			public ComponentLookup<Stumbling> m_StumblingData;
+
+			[ReadOnly]
+			public NativeQuadTree<Entity, QuadTreeBoundsXZ> m_MovingSearchTree;
+
+			public NativeHashMap<Entity, uint> m_StumblingUntil;
+
 			public void Execute()
 			{
 				foreach (Entity lane in m_Set)
@@ -698,6 +772,40 @@ namespace AccessAnarchy.Systems
 						continue;
 					}
 					if (!m_LaneObjects.TryGetBuffer(lane, out DynamicBuffer<LaneObject> buffer) || buffer.Length == 0)
+					{
+						continue;
+					}
+					// 撞击检测先行（删除只动注册缓冲，不影响行人 Transform）。
+					if (m_BloodEffects)
+					{
+						for (int j = 0; j < buffer.Length; j++)
+						{
+							Entity pedestrian = buffer[j].m_LaneObject;
+							if (m_StumblingUntil.ContainsKey(pedestrian) || m_StumblingData.HasComponent(pedestrian)
+								|| !m_HumanData.HasComponent(pedestrian))
+							{
+								continue;
+							}
+							if (!m_TransformData.TryGetComponent(pedestrian, out Game.Objects.Transform pedTransform))
+							{
+								continue;
+							}
+							BloodHitIterator iterator = default;
+							iterator.m_Position = pedTransform.m_Position;
+							iterator.m_Query = new Bounds3(pedTransform.m_Position - 2.5f, pedTransform.m_Position + 2.5f);
+							iterator.m_TransformData = m_TransformData;
+							iterator.m_VehicleData = m_VehicleData;
+							iterator.m_ParkedCarData = m_ParkedCarData;
+							iterator.m_Self = pedestrian;
+							m_MovingSearchTree.Iterate(ref iterator);
+							if (iterator.m_Hit)
+							{
+								m_Ecb.AddComponent<Stumbling>(pedestrian);
+								m_StumblingUntil[pedestrian] = m_Frame + 240;
+							}
+						}
+					}
+					if (!m_DoStrip)
 					{
 						continue;
 					}
@@ -723,6 +831,79 @@ namespace AccessAnarchy.Systems
 						}
 					}
 				}
+			}
+		}
+
+		/// <summary>四叉树查询：行人 1.5m 内是否存在移动中的车辆（排除自己与停靠车）。</summary>
+		private struct BloodHitIterator : INativeQuadTreeIterator<Entity, QuadTreeBoundsXZ>, IUnsafeQuadTreeIterator<Entity, QuadTreeBoundsXZ>
+		{
+			public Bounds3 m_Query;
+
+			public float3 m_Position;
+
+			public ComponentLookup<Game.Objects.Transform> m_TransformData;
+
+			public ComponentLookup<Vehicle> m_VehicleData;
+
+			public ComponentLookup<ParkedCar> m_ParkedCarData;
+
+			public Entity m_Self;
+
+			public bool m_Hit;
+
+			public bool Intersect(QuadTreeBoundsXZ bounds)
+			{
+				return MathUtils.Intersect(bounds.m_Bounds, m_Query);
+			}
+
+			public void Iterate(QuadTreeBoundsXZ bounds, Entity entity)
+			{
+				if (m_Hit || entity == m_Self || !m_VehicleData.HasComponent(entity) || m_ParkedCarData.HasComponent(entity))
+				{
+					return;
+				}
+				if (m_TransformData.TryGetComponent(entity, out Game.Objects.Transform transform)
+					&& math.distancesq(transform.m_Position.xz, m_Position.xz) < 2.25f)
+				{
+					m_Hit = true;
+				}
+			}
+		}
+
+		/// <summary>把到期（超过 240 帧）的踉跄行人恢复原状。</summary>
+		[BurstCompile]
+		private struct RemoveStumblingJob : IJob
+		{
+			public NativeHashMap<Entity, uint> m_Until;
+
+			public uint m_Frame;
+
+			public EntityCommandBuffer m_Ecb;
+
+			public void Execute()
+			{
+				int count = m_Until.Count;
+				if (count == 0)
+				{
+					return;
+				}
+				// 遍历中不能改容器：先收集到期键，再统一移除。
+				NativeList<Entity> expired = new NativeList<Entity>(count, Allocator.Temp);
+				NativeHashMap<Entity, uint>.Enumerator enumerator = m_Until.GetEnumerator();
+				while (enumerator.MoveNext())
+				{
+					if (m_Frame >= enumerator.Current.Value)
+					{
+						expired.Add(enumerator.Current.Key);
+						m_Ecb.RemoveComponent<Stumbling>(enumerator.Current.Key);
+					}
+				}
+				enumerator.Dispose();
+				for (int i = 0; i < expired.Length; i++)
+				{
+					m_Until.Remove(expired[i]);
+				}
+				expired.Dispose();
 			}
 		}
 	}

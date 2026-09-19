@@ -23,7 +23,7 @@ namespace AccessAnarchy
 
 		public void OnLoad(UpdateSystem updateSystem)
 		{
-			log.Info("Access Anarchy v0.7.0 loading (zero-Harmony ECS data editing)...");
+			log.Info("Access Anarchy v0.7.8 loading (restore check now mode-aware: access mode verifies non-crosswalk entries; retries with escalating delay)...");
 			if (GameManager.instance.modManager.TryGetExecutableAsset(this, out var asset))
 			{
 				log.Info($"Current mod asset at {asset.path}");

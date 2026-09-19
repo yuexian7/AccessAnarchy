@@ -52,7 +52,6 @@ namespace AccessAnarchy
 		private bool m_IncludeGarageLanes = true;
 		private bool m_IncludeConnectionLanes = true;
 		private bool m_IncludeParkingLotLanes = true;
-		private bool m_BloodEffects;
 
 		public Setting(IMod mod) : base(mod)
 		{
@@ -107,29 +106,21 @@ namespace AccessAnarchy
 			set => m_IncludeParkingLotLanes = value;
 		}
 
-		/// <summary>
-		/// 撞击反馈：被车辆穿过时行人踉跄数秒（游戏原生 Stumbling 动画），默认关闭。
-		/// 注：游戏不含血液粒子/贴花资产（低分级），纯代码模组无法凭空生成血迹贴图，
-		/// 因此以原生"被撞踉跄"作为穿过反馈；检测与超时移除由 AccessZoneOverlapSystem 完成。
-		/// </summary>
-		[SettingsUISection(kSection, kGroupMain)]
-		public bool BloodEffects
-		{
-			get => m_BloodEffects;
-			set => m_BloodEffects = value;
-		}
-
 		public bool IsGlobalMode()
 		{
 			return m_Mode == kModeGlobal;
 		}
 
-		/// <summary>启用/关闭快捷键（默认 F3）。玩家改键由框架 KeybindingSettings 持久化。</summary>
+		/// <summary>启用/关闭快捷键（默认 F3）。玩家改键由框架 KeybindingSettings 持久化。
+		/// 选项页标签必须用 GetOptionLabelLocaleID(属性名)——GetBindingKeyLocaleID(actionName)
+		/// 生成的是输入系统动作名（Options.OPTION[id/action/Press]），不是设置页那一行的标题。</summary>
 		[SettingsUIKeyboardBinding(BindingKeyboard.F3, kToggleEnabledAction)]
+		[SettingsUISection(kSection, kGroupMain)]
 		public ProxyBinding ToggleEnabledBinding { get; set; }
 
 		/// <summary>切换避让范围快捷键（默认 F4）。</summary>
 		[SettingsUIKeyboardBinding(BindingKeyboard.F4, kToggleScopeAction)]
+		[SettingsUISection(kSection, kGroupMain)]
 		public ProxyBinding ToggleScopeBinding { get; set; }
 
 		/// <summary>热键入口：翻转总开关并落盘。只在主线程（输入事件）调用。</summary>
@@ -205,7 +196,6 @@ namespace AccessAnarchy
 			m_IncludeGarageLanes = true;
 			m_IncludeConnectionLanes = true;
 			m_IncludeParkingLotLanes = true;
-			m_BloodEffects = false;
 		}
 	}
 
@@ -282,12 +272,14 @@ namespace AccessAnarchy
 				{ setting.GetOptionLabelLocaleID(nameof(Setting.IncludeParkingLotLanes)), d["lot.label"] },
 				{ setting.GetOptionDescLocaleID(nameof(Setting.IncludeParkingLotLanes)), d["lot.desc"] },
 
-				{ setting.GetBindingKeyLocaleID(Setting.kToggleEnabledAction), d["hotkey.enabled"] },
-				{ setting.GetBindingKeyLocaleID(Setting.kToggleScopeAction), d["hotkey.scope"] },
-				{ setting.GetBindingMapLocaleID(), d["bindingMap"] },
-
-				{ setting.GetOptionLabelLocaleID(nameof(Setting.BloodEffects)), d["blood.label"] },
-				{ setting.GetOptionDescLocaleID(nameof(Setting.BloodEffects)), d["blood.desc"] }
+				// 键位行标题/说明走属性名（与 BLG v1.0.3 同款）：框架设置页渲染
+				// ProxyBinding 属性时用 GetOptionLabelLocaleID(nameof(属性))，不是
+				// GetBindingKeyLocaleID(actionName)。后者只给输入系统动作名用。
+				{ setting.GetOptionLabelLocaleID(nameof(Setting.ToggleEnabledBinding)), d["hotkey.enabled"] },
+				{ setting.GetOptionDescLocaleID(nameof(Setting.ToggleEnabledBinding)), d["hotkey.enabled.desc"] },
+				{ setting.GetOptionLabelLocaleID(nameof(Setting.ToggleScopeBinding)), d["hotkey.scope"] },
+				{ setting.GetOptionDescLocaleID(nameof(Setting.ToggleScopeBinding)), d["hotkey.scope.desc"] },
+				{ setting.GetBindingMapLocaleID(), d["bindingMap"] }
 			};
 		}
 
@@ -332,10 +324,10 @@ namespace AccessAnarchy
 				{ "lot.label", "Parking lots and building-internal lanes" },
 				{ "lot.desc", "Include lanes inside parking lots and other building-owned roads." },
 				{ "hotkey.enabled", "Enable/disable the mod" },
+				{ "hotkey.enabled.desc", "Toggle the entire mod on or off without opening the options menu." },
 				{ "hotkey.scope", "Switch scope mode" },
-				{ "bindingMap", "Access Anarchy key bindings" },
-				{ "blood.label", "Impact feedback: pedestrians stumble" },
-				{ "blood.desc", "When a vehicle drives through a pedestrian, the pedestrian stumbles for a few seconds (vanilla hit animation), then recovers. Off by default. Note: the game contains no blood particle or decal assets, so a literal blood splash cannot be added by a code-only mod." }
+				{ "hotkey.scope.desc", "Switch between access zones only and all roads (global)." },
+				{ "bindingMap", "Access Anarchy key bindings" }
 			};
 		}
 
@@ -349,7 +341,7 @@ namespace AccessAnarchy
 				{ "group.scope", "出入口范围" },
 				{ "enabled.label", "车辆穿过行人" },
 				{ "enabled.desc", "车辆在停车场、仓库、商场等建筑出入口处不再因行人减速或停车，直接穿过行人；行人照常行走。关闭后完全恢复原版行为。" },
-				{ "mode.label", "作用范围" },
+				{ "mode.label", "避让范围" },
 				{ "mode.desc", "仅出入口区域：只处理建筑出入口、车库坡道与停车场内部。全部道路（全局）：车辆在任何地方都不再让行行人，包括人行横道。" },
 				{ "mode.warning", "全局模式会禁用全市所有车辆对行人的避让。" },
 				{ kModeAccess, "仅出入口区域" },
@@ -361,10 +353,10 @@ namespace AccessAnarchy
 				{ "lot.label", "停车场与建筑内部车道" },
 				{ "lot.desc", "包含停车场内部车道与建筑自有道路。" },
 				{ "hotkey.enabled", "启用/关闭模组" },
+				{ "hotkey.enabled.desc", "无需打开选项菜单，直接开关整个模组。" },
 				{ "hotkey.scope", "切换避让范围" },
-				{ "bindingMap", "Access Anarchy 键位" },
-				{ "blood.label", "撞击反馈：行人踉跄" },
-				{ "blood.desc", "行人被车辆穿过时会踉跄数秒（游戏原生被撞动画）后恢复，默认关闭。注：游戏本身不包含血液粒子或贴花资产，纯代码模组无法添加真实的血迹效果。" }
+				{ "hotkey.scope.desc", "在「仅出入口区域」与「全部道路（全局）」之间切换。" },
+				{ "bindingMap", "Access Anarchy 键位" }
 			};
 		}
 
@@ -378,7 +370,7 @@ namespace AccessAnarchy
 				{ "group.scope", "出入口範圍" },
 				{ "enabled.label", "車輛穿越行人" },
 				{ "enabled.desc", "車輛在停車場、倉庫、商場等建築出入口處不再因行人減速或停車，直接穿越行人；行人照常行走。關閉後完全恢復原版行為。" },
-				{ "mode.label", "作用範圍" },
+				{ "mode.label", "避讓範圍" },
 				{ "mode.desc", "僅出入口區域：只處理建築出入口、車庫坡道與停車場內部。全部道路（全域）：車輛在任何地方都不再禮讓行人，包括行人穿越道。" },
 				{ "mode.warning", "全域模式會停用全市所有車輛對行人的禮讓。" },
 				{ kModeAccess, "僅出入口區域" },
@@ -390,10 +382,10 @@ namespace AccessAnarchy
 				{ "lot.label", "停車場與建築內部車道" },
 				{ "lot.desc", "包含停車場內部車道與建築自有道路。" },
 				{ "hotkey.enabled", "啟用/關閉模組" },
+				{ "hotkey.enabled.desc", "無需打開選項選單，直接開關整個模組。" },
 				{ "hotkey.scope", "切換避讓範圍" },
-				{ "bindingMap", "Access Anarchy 鍵位" },
-				{ "blood.label", "撞擊回饋：行人踉蹌" },
-				{ "blood.desc", "行人被車輛穿越時會踉蹌數秒（遊戲原生被撞動畫）後恢復，預設關閉。註：遊戲本身不包含血液粒子或貼花資產，純程式碼模組無法新增真實的血跡效果。" }
+				{ "hotkey.scope.desc", "在「僅出入口區域」與「全部道路（全域）」之間切換。" },
+				{ "bindingMap", "Access Anarchy 鍵位" }
 			};
 		}
 
@@ -419,10 +411,10 @@ namespace AccessAnarchy
 				{ "lot.label", "Parkplätze und Gebäudeinnenflächen" },
 				{ "lot.desc", "Fahrbahnen innerhalb von Parkplätzen und andere grundstückseigene Straßen einschließen." },
 				{ "hotkey.enabled", "Mod aktivieren/deaktivieren" },
+				{ "hotkey.enabled.desc", "Das gesamte Mod ohne Optionsmenü ein- oder ausschalten." },
 				{ "hotkey.scope", "Bereichsmodus wechseln" },
-				{ "bindingMap", "Access Anarchy-Tastenkürzel" },
-				{ "blood.label", "Aufprall-Feedback: Fußgänger taumeln" },
-				{ "blood.desc", "Wenn ein Fahrzeug durch einen Fußgänger fährt, torkelt dieser einige Sekunden (Original-Animationsablauf) und erholt sich dann. Standardmäßig aus. Hinweis: Das Spiel enthält keine Blut-Partikel- oder Decal-Assets, daher kann ein reiner Code-Mod kein echtes Blut hinzufügen." }
+				{ "hotkey.scope.desc", "Zwischen nur Zugangsbereichen und allen Straßen (global) wechseln." },
+				{ "bindingMap", "Access Anarchy-Tastenkürzel" }
 			};
 		}
 
@@ -448,10 +440,10 @@ namespace AccessAnarchy
 				{ "lot.label", "Aparcamientos y vías internas" },
 				{ "lot.desc", "Incluir los carriles dentro de aparcamientos y otras vías propias de los edificios." },
 				{ "hotkey.enabled", "Activar/desactivar el mod" },
+				{ "hotkey.enabled.desc", "Activa o desactiva todo el mod sin abrir el menú de opciones." },
 				{ "hotkey.scope", "Cambiar modo de alcance" },
-				{ "bindingMap", "Atajos de Access Anarchy" },
-				{ "blood.label", "Respuesta de impacto: peatones tambaleantes" },
-				{ "blood.desc", "Cuando un vehículo atraviesa a un peatón, este tambalea durante unos segundos (animación nativa de atropello) y luego se recupera. Desactivado por defecto. Nota: el juego no contiene partículas ni calcomanías de sangre, por lo que un mod de solo código no puede añadir sangre real." }
+				{ "hotkey.scope.desc", "Alterna entre solo accesos y todas las vías (global)." },
+				{ "bindingMap", "Atajos de Access Anarchy" }
 			};
 		}
 
@@ -477,10 +469,10 @@ namespace AccessAnarchy
 				{ "lot.label", "Parkings et voies internes" },
 				{ "lot.desc", "Inclure les voies à l'intérieur des parkings et autres routes privées des bâtiments." },
 				{ "hotkey.enabled", "Activer/désactiver le mod" },
+				{ "hotkey.enabled.desc", "Active ou désactive tout le mod sans ouvrir le menu des options." },
 				{ "hotkey.scope", "Changer le mode de portée" },
-				{ "bindingMap", "Raccourcis d'Access Anarchy" },
-				{ "blood.label", "Retour dimpact : piétons chancelants" },
-				{ "blood.desc", "Quand un véhicule traverse un piéton, celui-ci chancelle quelques secondes (animation native de collision) puis se rétablit. Désactivé par défaut. Note : le jeu ne contient aucune particule ni décalque de sang, un mod sans assets ne peut pas ajouter de vrai sang." }
+				{ "hotkey.scope.desc", "Bascule entre accès uniquement et toutes les voies (global)." },
+				{ "bindingMap", "Raccourcis d'Access Anarchy" }
 			};
 		}
 
@@ -506,10 +498,10 @@ namespace AccessAnarchy
 				{ "lot.label", "Parcheggi e strade interne" },
 				{ "lot.desc", "Includi le corsie all'interno dei parcheggi e le strade private degli edifici." },
 				{ "hotkey.enabled", "Attiva/disattiva la mod" },
+				{ "hotkey.enabled.desc", "Attiva o disattiva l'intera mod senza aprire il menu delle opzioni." },
 				{ "hotkey.scope", "Cambia modalità di ambito" },
-				{ "bindingMap", "Scorciatoie di Access Anarchy" },
-				{ "blood.label", "Feedback dimpatto: pedoni barcollanti" },
-				{ "blood.desc", "Quando un veicolo attraversa un pedone, questultimo barcolla per alcuni secondi (animazione nativa di impatto) e poi si riprende. Disattivato per impostazione predefinita. Nota: il gioco non contiene particelle o decalcomanie di sangue, quindi una mod solo codice non può aggiungere sangue reale." }
+				{ "hotkey.scope.desc", "Alterna tra solo accessi e tutte le strade (globale)." },
+				{ "bindingMap", "Scorciatoie di Access Anarchy" }
 			};
 		}
 
@@ -535,10 +527,10 @@ namespace AccessAnarchy
 				{ "lot.label", "駐車場と敷地内道路" },
 				{ "lot.desc", "駐車場内の車線や建物所有の道路を含めます。" },
 				{ "hotkey.enabled", "Modの有効/無効" },
+				{ "hotkey.enabled.desc", "オプションメニューを開かずにMod全体をオン/オフします。" },
 				{ "hotkey.scope", "適用範囲の切り替え" },
-				{ "bindingMap", "Access Anarchy のキー割り当て" },
-				{ "blood.label", "衝突フィードバック：歩行者がよろける" },
-				{ "blood.desc", "車両が歩行者の上を通過すると、歩行者が数秒間よろけます（ゲーム標準の衝突アニメーション）した後回復します。既定ではオフ。注：ゲームには血のパーティクルやデカールのアセットが含まれず、コードのみのModで実際の血痕を追加することはできません。" }
+				{ "hotkey.scope.desc", "「アクセスのみ」と「すべての道路（グローバル）」を切り替えます。" },
+				{ "bindingMap", "Access Anarchy のキー割り当て" }
 			};
 		}
 
@@ -564,10 +556,10 @@ namespace AccessAnarchy
 				{ "lot.label", "주차장 및 부지 내 도로" },
 				{ "lot.desc", "주차장 내부 차선과 건물 소유 도로를 포함합니다." },
 				{ "hotkey.enabled", "모드 켜기/끄기" },
+				{ "hotkey.enabled.desc", "옵션 메뉴를 열지 않고 모드 전체를 켜거나 끕니다." },
 				{ "hotkey.scope", "적용 범위 전환" },
-				{ "bindingMap", "Access Anarchy 키 설정" },
-				{ "blood.label", "충돌 피드백: 보행자 비틀거림" },
-				{ "blood.desc", "차량이 보행자를 통과하면 보행자가 몇 초간 비틀거립니다(게임 기본 충돌 애니메이션) 후 회복합니다. 기본적으로 꺼짐. 참고: 게임에는 피 파티클이나 데칼 에셋이 없어 코드 전용 모드로 실제 피 효과를 추가할 수 없습니다." }
+				{ "hotkey.scope.desc", "출입 구역만과 모든 도로(전역) 사이를 전환합니다." },
+				{ "bindingMap", "Access Anarchy 키 설정" }
 			};
 		}
 
@@ -593,10 +585,10 @@ namespace AccessAnarchy
 				{ "lot.label", "Parkingi i drogi wewnętrzne" },
 				{ "lot.desc", "Uwzględnij pasy na parkingach oraz inne drogi należące do budynków." },
 				{ "hotkey.enabled", "Włącz/wyłącz mod" },
+				{ "hotkey.enabled.desc", "Włącz lub wyłącz cały mod bez otwierania menu opcji." },
 				{ "hotkey.scope", "Przełącz tryb zakresu" },
-				{ "bindingMap", "Skróty Access Anarchy" },
-				{ "blood.label", "Sprzężenie uderzenia: oszołomieni piesi" },
-				{ "blood.desc", "Gdy pojazd przejeżdża przez pieszego, pieszy szwankuje przez kilka sekund (oryginalna animacja uderzenia), a potem dochodzi do siebie. Domyślnie wyłączone. Uwaga: gra nie zawiera cząstek ani naklejek krwi, więc mod wyłącznie kodowy nie może dodać prawdziwej krwi." }
+				{ "hotkey.scope.desc", "Przełącza między tylko strefami dostępu a wszystkimi drogami (globalnie)." },
+				{ "bindingMap", "Skróty Access Anarchy" }
 			};
 		}
 
@@ -622,10 +614,10 @@ namespace AccessAnarchy
 				{ "lot.label", "Estacionamentos e vias internas" },
 				{ "lot.desc", "Incluir faixas dentro de estacionamentos e vias particulares de edifícios." },
 				{ "hotkey.enabled", "Ativar/desativar o mod" },
+				{ "hotkey.enabled.desc", "Ativa ou desativa todo o mod sem abrir o menu de opções." },
 				{ "hotkey.scope", "Alternar modo de escopo" },
-				{ "bindingMap", "Atalhos do Access Anarchy" },
-				{ "blood.label", "Feedback de impacto: pedestres cambaleantes" },
-				{ "blood.desc", "Quando um veículo atravessa um pedestre, ele cambaleia por alguns segundos (animação nativa de atropelamento) e depois se recupera. Desligado por padrão. Nota: o jogo não contém partículas ou adesivos de sangue, então um mod apenas de código não pode adicionar sangue real." }
+				{ "hotkey.scope.desc", "Alterna entre somente acessos e todas as vias (global)." },
+				{ "bindingMap", "Atalhos do Access Anarchy" }
 			};
 		}
 
@@ -651,10 +643,10 @@ namespace AccessAnarchy
 				{ "lot.label", "Парковки и внутренние дороги" },
 				{ "lot.desc", "Включить полосы внутри парковок и другие дороги на территории зданий." },
 				{ "hotkey.enabled", "Включить/выключить мод" },
+				{ "hotkey.enabled.desc", "Включает или выключает весь мод без открытия меню настроек." },
 				{ "hotkey.scope", "Переключить режим зоны" },
-				{ "bindingMap", "Горячие клавиши Access Anarchy" },
-				{ "blood.label", "Обратная связь удара: шатающиеся пешеходы" },
-				{ "blood.desc", "Когда транспорт проезжает сквозь пешехода, тот несколько секунд шатается (стандартная анимация удара), затем приходит в себя. По умолчанию выключено. Примечание: в игре нет частиц или декалей крови, поэтому мод без ассетов не может добавить настоящую кровь." }
+				{ "hotkey.scope.desc", "Переключает между зонами въездов и всеми дорогами (глобально)." },
+				{ "bindingMap", "Горячие клавиши Access Anarchy" }
 			};
 		}
 	}

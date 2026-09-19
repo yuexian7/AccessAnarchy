@@ -16,6 +16,8 @@
 
 ## 安装
 
+正式版本：在 Paradox Mods 订阅 [Access Anarchy（ModId 158842）](https://mods.paradoxplaza.com/mods/158842/windows)，当前线上版本 v0.7.8。
+
 开发构建可部署到以下任一位置（游戏会扫描两者）：
 
 ```
@@ -34,18 +36,27 @@ F:\SteamLibrary\steamapps\common\Cities Skylines II\Cities Skylines II\Mods\.Acc
 
 | 选项 | 默认 | 说明 |
 |---|---|---|
-| 车辆穿过行人 | 开 | 总开关。关闭后完全恢复原版行为 |
-| 作用范围 | 仅出入口区域 | `仅出入口区域` 或 `全部道路（全局）`。全局模式会禁用全市所有车让人行为，含人行横道 |
+| 车辆穿过行人 | 开 | 总开关。关闭后会触发一次全城车道重叠关系重建，完全恢复原版行为（关闭瞬间会短促卡顿，属正常） |
+| 避让范围 | 仅出入口区域 | `仅出入口区域` 或 `全部道路（全局）`。全局模式会禁用全市所有车让人行为，含人行横道（有信号灯的路口仍会因红灯停车，那是原版信号灯逻辑，不是让行人） |
 | 车库坡道 | 开 | 车库/停车楼的出入口坡道 |
 | 建筑出入连接道 | 开 | 建筑/场站与路网之间的连接道（driveway） |
 | 停车场与建筑内部车道 | 开 | 停车场内部行驶道、停车位道、建筑自有道路 |
+
+快捷键（可在选项页里改键，改键会持久化）：
+
+| 快捷键 | 作用 |
+|---|---|
+| F3 | 开启/关闭本模组 |
+| F4 | 在「仅出入口区域」与「全部道路（全局）」之间切换避让范围 |
+
+用快捷键切换时可能卡顿一下：避让范围变小或关闭模组时，需要请游戏重建一次全市的车道重叠关系（与读档时的重建同一条路径），属正常现象。
 
 设置自动保存，改动即时生效，无需重启游戏。
 
 ## 兼容性
 
 - **零 Harmony 补丁**——不存在补丁被其他模组 `UnpatchAll` 拆掉的问题，也不与任何基于 Harmony 的模组（Traffic、Skyve 等）产生补丁冲突。
-- 与修改交通行为的模组理论上可共存：本模组不持有任何缓存状态，每 4 个模拟帧重新应用一次删除，别的模组怎么改车道数据都不会导致永久性不一致。
+- 与修改交通行为的模组理论上可共存：本模组不持有任何游戏侧缓存，删除只在修路/建拆触发游戏重建后重新应用（事件驱动），别的模组怎么改车道数据都不会导致永久性不一致；关闭或缩小避让范围时会请游戏重建全市重叠关系，不会留下残留状态。
 - Realistic Path Finding 等改行人寻路的模组不受影响：行人寻路不读取本模组删除的 `LaneOverlap` 数据。
 
 ## 构建
@@ -53,7 +64,7 @@ F:\SteamLibrary\steamapps\common\Cities Skylines II\Cities Skylines II\Mods\.Acc
 需要游戏官方模组工具链（游戏内启用模组支持后自动配置 `CSII_*` 环境变量）：
 
 ```bash
-cd D:\WorkSpace\AccessAnarchy
+cd D:\WorkSpace\CS2MOD\AccessAnarchy
 dotnet build -c Release
 ```
 
@@ -68,7 +79,7 @@ AccessAnarchy/
 ├── Setting.cs                        # 选项面板（ModSetting 框架，中英双语）
 ├── Systems/
 │   └── AccessZoneOverlapSystem.cs    # 核心：删除出入口车道↔行人道的 LaneOverlap
-├── Properties/PublishConfiguration.xml  # Paradox Mods 发布元数据（已发布：ModId 158842，v0.6.0 Public）
+├── Properties/PublishConfiguration.xml  # Paradox Mods 发布元数据（ModId 158842，Public，线上当前 v0.7.8）
 ├── research/                         # 开发期反编译调研产物（不参与编译）
 └── template/                         # 官方模组模板副本（不参与编译）
 ```

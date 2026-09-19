@@ -18,18 +18,16 @@
 	<Tag Value="Code Mod" />
 	<ExternalLink Type="github" Url="https://github.com/yuexian7/AccessAnarchy" />
 	<ExternalLink Type="kofi" Url="https://ko-fi.com/yuexian7" />
+	<!--Change log for NEW VERSION ONLY（线上 changelog 是「一个平台版本一条条目」，条目日期＝该版本发布时间，所以正文里绝不能夹带历史版本的日志；历史条目平台不提供改写，Update/Patch 请求也不携带 changelogEntry，只有 NewVersion 会带）。正文用元素形式、行首不缩进，`- ` 项目符号 + 空行才会被渲染成多行（写成连续行会被压成一整段）。-->
 	<ChangeLog>
-		<v0.6.0>
-			Initial release.
-			Vehicles pass through pedestrians at building access points (parking lots, warehouses, stores...). Pedestrians keep walking normally; car-to-car yielding and crosswalks are untouched.
-			Zero Harmony patches - pure ECS data editing. 12-language settings UI.
-			Scope modes: access zones only (default) or all roads (global).
-		</v0.6.0>
-		<v0.7.8>
-			Performance massively optimized, the frame rate is clearly better than v0.6.0.
-			New hotkey settings (default F3 = enable/disable, F4 = switch avoidance scope). Enabling the mod with the hotkey while playing may cause a brief stutter, which is normal.
-			大幅优化了性能，帧数得到了明显的提升。
-			新增快捷键设置（默认 F3 开启/关闭模组，F4 切换避让范围），在游戏时用快捷键开启模组可能会卡顿一下，属于正常现象。
-		</v0.7.8>
+v0.7.8
+
+- Performance massively optimized, the frame rate is clearly better than v0.6.0.
+- New hotkey settings (default F3 = enable/disable, F4 = switch avoidance scope). Enabling the mod with the hotkey while playing may cause a brief stutter, which is normal.
+
+中文
+
+- 大幅优化了性能，帧数得到了明显的提升。
+- 新增快捷键设置（默认 F3 开启/关闭模组，F4 切换避让范围），在游戏时用快捷键开启模组可能会卡顿一下，属于正常现象。
 	</ChangeLog>
 </PublishConfiguration>

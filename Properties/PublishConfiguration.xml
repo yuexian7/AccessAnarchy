@@ -4,7 +4,7 @@
 	<!--首发成功（2026-09-12，Unlisted）：ModId 158842。此后重传二进制一律用 PublishNewVersion，别用 Update（会烧版本号）。-->
 	<ModId Value="158842" />
 	<ForumLink Value="https://forum.paradoxplaza.com/forum/threads/access-anarchy.1941285/" />
-	<ModVersion Value="0.7.9" />
+	<ModVersion Value="0.8.0" />
 	<!--线上 requiredVersion 就是这个值；本机游戏 bundleVersion 实测 1.6.0f1（Unity 2022.3.71f1）-->
 	<GameVersion Value="1.6.*" />
 	<AccessLevel Value="Public" />
@@ -24,12 +24,32 @@
 	<ExternalLink Type="kofi" Url="https://ko-fi.com/yuexian7" />
 	<!--Change log for NEW VERSION ONLY（线上 changelog 是「一个平台版本一条条目」，条目日期＝该版本发布时间，所以正文里绝不能夹带历史版本的日志；历史条目平台不提供改写，Update/Patch 请求也不携带 changelogEntry，只有 NewVersion 会带）。正文用元素形式、行首不缩进，`- ` 项目符号 + 空行才会被渲染成多行（写成连续行会被压成一整段）。-->
 	<ChangeLog>
-v0.7.9
+v0.8.0
 
-- Fixed a few minor issues.
+- Fixed: rare cases where vehicles still yielded to pedestrians at parking-lot entrances that previously worked.
+
+- New: the three "no-yield scope" options now really apply, independently: parking lots, vehicle entrances connecting buildings to external roads, and internal roads inside buildings. Parking lots are not counted as buildings, so the second option does not affect parking-lot entrances.
+
+- Fixed: the scope options were not saved and reset on every restart.
+
+- Fixed: hotkeys were lost after restarting the game.
+
+- New: an About section at the bottom of the mod options, with the mod version, the author, and three link buttons.
+
+- Localization: wording aligned with the game's official terms in all 12 supported languages; the scope section is now named "no-yield scope".
 
 中文
 
-- 修复了一点小问题。
+- 修复：个别停车场出入口偶发仍然避让行人的问题。
+
+- 新增：不避让范围的三个选项现在真正分别生效——停车场、建筑与外部道路车辆出入口、建筑内部道路。停车场不算建筑，勾选第二项不会影响停车场出入口。
+
+- 修复：不避让范围的勾选重启后不保存的问题。
+
+- 修复：重启游戏后快捷键失效的问题。
+
+- 新增：模组选项页底部「关于」板块，包含模组版本、作者和三个跳转按钮。
+
+- 本地化：12 种语言用词与游戏官方用语对齐，范围板块统一改名为「不避让范围」。
 	</ChangeLog>
 </PublishConfiguration>

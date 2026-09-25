@@ -4,6 +4,7 @@ using System.Runtime.CompilerServices;
 using Colossal.Collections;
 using Colossal.Mathematics;
 using Game;
+using Game.Buildings;
 using Game.Common;
 using Game.Net;
 using Game.Simulation;
@@ -98,6 +99,46 @@ namespace AccessAnarchy.Systems
 	///    注：这套恢复机制与"我们删了什么"无关——原版重建是整表 Clear 后重算，
 	///    所以全局模式关闭（含横道条目被删）同样能回到原版。
 	///
+	/// v0.8.0 出入口仍会避让的根因（实机：个别停车场出入口偶尔仍会礼让行人，同一个停车场早前测是好的）：	/// 本系统一直把「车道自己带 Updated」当成原版重建 overlap 的事件信号（m_RefreshQuery 注释里
+	/// 已就地更正那个早期假设）。逐行读反编译件 LaneOverlapSystem 后确认这个信号根本不成立：
+	///   - 全文只有 4 处读 Updated（:29 AddNonUpdatedEdgesJob.m_UpdatedData、:975 UpdateLaneOverlapsJob、
+	///     :1083/:1087 跨拥有者取节点、:1893-1894 两个查询定义），**没有任何一处 AddComponent&lt;Updated&gt;**；
+	///   - 它重建时按 owner 的 SubLane 逐条 `bufferData.Clear()`(:1077) 再 Add(:1400/:1420)，
+	///     被改写的车道不会因此带上 Updated。
+	/// 车道级 Updated 的真实来源只有 LaneSystem.cs:2092（重生成车道）、RoadConnectionSystem.cs:1321
+	/// （新建连接道）这类"车道被重建"的场合。于是任何一次「owner 被 Updated 而车道没被 Updated」的改写
+	/// ——最典型就是停车场/建筑状态变化、出入口相邻节点被别的编辑牵动——行人条目回来后我们收不到，
+	/// 只能等下一次集合整轮重建（kSetRebuildInterval=2048 帧 ≈ 34 秒）由集合内批量重删捡回来；
+	/// 全局模式更糟：它没有周期性重删，条目一旦回来就永远回来。
+	/// "同一个停车场早先是好的"由此解释——好与不好取决于那一刻离上次整轮重建过了多久。
+	///
+	/// 修法：新增干预点 (0) StripRebuiltLanesJob，闸门与原版逐条同口径
+	/// （m_RebuildOwnerQuery=[SubLane,Updated,!Deleted] ≡ LaneOverlapSystem.cs:1893），
+	/// 遍历对象也与原版工作清单一致（owner 的 SubLane，加上 Updated 节点经 ConnectedEdge
+	/// 拉进来的相邻 edge，即 AddNonUpdatedEdgesJob :26-54）。时间上成立的理由是阶段顺序：
+	/// LaneOverlapSystem 在 Modification4B（SystemOrder.cs:178）早于本系统的 GameSimulation
+	/// （SystemUpdatePhase 枚举顺序 Modification4B &lt; GameSimulation &lt; Cleanup），
+	/// 而 Updated 要到帧末 Cleanup 才被 CleanUpSystem.cs:53 摘掉
+	/// （PrepareCleanUpSystem 只是在 MainLoop 抄一份清单，不移除），
+	/// 所以同一个非空状态我们在同一帧看得见 → 一帧内收敛，不再靠 34 秒兜底。
+	/// 没被改写过、或改写后本来就没有行人条目的车道在计数为 0 时直接返回，不产生 ECB 写入，
+	/// 因此不会退化成 v0.7.2 特意删掉的每帧写战。
+	/// 顺带把判定侧的曲线采样从 3 点补到与放锚点一致的 5 点（长/弯引道的"弦中点"会偏离曲线本体）。
+	/// 心跳日志新增三行自证指标：Rebuild gate / Anchor grid capacity / Access set audit，
+	/// 判读方法见 ReportRebuildDiagnostics 的注释。
+	///
+	/// v0.8.0 第二轮：「不避让范围」三个勾选框此前完全无效（作者实机反馈：关任何一个都不改变行为）。
+	/// 根因是锚点网格不分类型：BuildAnchorGridJob 把所有 Garage/Connection/Area 车道的曲线都收进网格，
+	/// 而出入口模式的判据是「类型 / 集合成员 / 锚点邻域」三选一 —— 即使按类型排除了某一类，
+	/// 那一类旁边的其它类锚点照样让邻近车辆车道命中「锚点邻域」，于是开关形同虚设。
+	/// 现在：① 三个开关重定义为互不重叠的三类（停车场 / 建筑与外部道路的车辆出入口 / 建筑内部道路，
+	/// 见 LaneCategory），② 锚点网格与邻域集合都按当下 IncludeMask 过滤后才收录，
+	/// ③ 三份类型判定收敛到 LaneCategory + IsInNoYieldScope 一处，避免再次各写一份而漂移。
+	/// "停车场"按所属建筑带不带 ParkingFacility/CarParkingFacility 判定，不按车道组件判定
+	/// （停车场门口那条连接道和商店门口那条是同一个 ConnectionLane），所以勾第二条不会连带停车场。
+	/// 开关变化仍走 v0.7.6/0.7.8 的「先让原版整表重建、再按新范围重删」路径（narrowed 分支），
+	/// 所以关掉的类别会在 kReapplyDelayFrames(120 帧) 后恢复原版避让，不会留下永久剥离态。
+	///
 	/// v0.7.8 出入口模式恢复判据修正（实机：出入口模式下只要开启过就永远不避让）：
 	/// 用户日志实据（Logs\AccessAnarchy.AccessAnarchyMod.log，2026-09-19 15:41:33 与 15:43:26 两轮）：
 	/// 那两次"Restore audit: ... vanilla avoidance restored"报的是 54510 车道 / 73063 条目，
@@ -165,16 +206,40 @@ namespace AccessAnarchy.Systems
 		/// <summary>审计计数每块占几个 int：车辆车道数、行人条目数、横道车道数、横道条目数。</summary>
 		private const int kAuditCountersPerChunk = 4;
 
+		/// <summary>重删计数数组：64 个槽 × 2（该槽内「修好的车道数」「删掉的行人条目数」）。
+		/// 按 unfilteredChunkIndex &amp; 63 取槽，槽位撞车时计数偏低——它只是诊断用的下界，
+		/// 不参与任何行为判断，所以不做原子操作（Burst 里加锁/原子的写法风险更大）。</summary>
+		private const int kRepairSlots = 64;
+
+		/// <summary>锚点网格诊断槽：0=被容量上限丢掉的锚点数，1=单格最多锚点数，2=锚点总数，3=占用格数。</summary>
+		private const int kGridStatsSlots = 4;
+
 		private SimulationSystem m_SimulationSystem;
 		private EndFrameBarrier m_EndFrameBarrier;
 		private EntityQuery m_OverlapQuery;
 		private EntityQuery m_AnchorQuery;
 
 		/// <summary>事件驱动重刷查询：匹配刚被 LaneOverlapSystem 重建过 overlap 的车道（带 Updated 标记）。
-		/// Updated 是单帧脏标记（CleanUpSystem 帧末移除），LaneOverlapSystem 在 Modification4B 阶段
-		/// 重建 overlap 后，本系统在 GameSimulation 阶段仍能看到 Updated → 当帧重删，零延迟。
+		/// 注意 v0.8.0 的更正：这条路径**不是**主要机制。反编译 LaneOverlapSystem 全文，
+		/// Updated 只以 ComponentLookup 形式被读取（:29 :975 :1083 :1087 :1893-1894），
+		/// 该系统从不给车道 AddComponent&lt;Updated&gt;，所以"原版重建完 overlap 后车道还带着 Updated，
+		/// 我们当帧重删"这个早期假设不成立。车道级 Updated 的真正来源是
+		/// LaneSystem.cs:2092 与 RoadConnectionSystem.cs:1321（新建/重生成车道），
+		/// 这条查询只覆盖到那批实体；其余被原版改写过 overlap 的车道由 m_RebuildOwnerQuery 兜住。
 		/// 稳态下匹配 0 实体，成本 ≈ 0。</summary>
 		private EntityQuery m_RefreshQuery;
+
+		/// <summary>v0.8.0 主要重删闸门：与原版 LaneOverlapSystem.m_UpdatedOwnersQuery 逐条同口径
+		/// （All=[SubLane,Updated]，None=[Deleted]，见 LaneOverlapSystem.cs:1893，闸门 :1918-1920）。
+		/// 原版每帧只要这个查询非空，就会把清单内实体（以及 Updated 节点经 ConnectedEdge 拉进来的
+		/// 相邻 edge，AddNonUpdatedEdgesJob :26-54）的 SubLane 逐条 bufferData.Clear() 后重算 overlap
+		/// （UpdateOverlaps :1038-1043 / :1077）——被删掉的行人条目就是在这一刻回来的。
+		/// 该阶段（Modification4B，SystemOrder.cs:178）早于本系统的 GameSimulation，而 Updated
+		/// 要到帧末 Cleanup 才被摘掉（PrepareCleanUpSystem 只在 MainLoop 抄清单，
+		/// CleanUpSystem.cs:53 才是移除点，SystemUpdatePhase 枚举顺序 Modification4B &lt; GameSimulation &lt; Cleanup），
+		/// 所以本系统在**同一帧**能看到同一个非空状态 → 按同一批实体重删，一帧内收敛。
+		/// 稳态（无人修路、无建筑状态变化）匹配 0 实体，成本 = 一次 IsEmptyIgnoreFilter。</summary>
+		private EntityQuery m_RebuildOwnerQuery;
 
 		/// <summary>关闭恢复兜底用：网络"拥有者"实体（道路 edge / 节点 node / 建筑，即带 SubLane 缓冲者），
 		/// 与原版 LaneOverlapSystem.m_AllOwnersQuery 同口径（那里只有 SubLane + !Deleted）。
@@ -245,12 +310,27 @@ namespace AccessAnarchy.Systems
 		/// 注意 v0.7.5 曾以为"给车道打 Updated"即可，实测无效，见类注释 v0.7.6。</summary>
 		private bool m_WasEnabled;
 
+		/// <summary>本局是否已经打过键位诊断（Setting.ReportKeyBindings "in-game"）。
+		/// 只能在系统跑起来之后打第一次：那时所有模组都注册完自己的动作了，
+		/// 游戏自己也在 UIReady 后算过 hasConflicts，冲突判定才有意义。</summary>
+		private bool m_KeyReported;
+
 		/// <summary>上次观察到的作用模式/范围开关，变化时强制重建集合。</summary>
 		private int m_LastMode = -1;
 		private int m_LastIncludeMask = -1;
 
 		private bool m_LoggedFirstRun;
 		private ulong m_TotalPasses;
+
+		/// <summary>重删诊断计数（见 kRepairSlots）：由 StripRebuiltLanesJob 写，心跳时读完清零。</summary>
+		private NativeArray<int> m_RepairCounters;
+
+		/// <summary>锚点网格诊断计数（见 kGridStatsSlots）：BuildAnchorGridJob 单线程写，心跳时读。</summary>
+		private NativeArray<int> m_GridStats;
+
+		/// <summary>本心跳周期内原版重建闸门被打开的帧数，以及最后一帧的 owner 数（主线程计数，无竞态）。</summary>
+		private int m_GateFrames;
+		private int m_GateLastOwners;
 
 		[Preserve]
 		protected override void OnCreate()
@@ -266,6 +346,8 @@ namespace AccessAnarchy.Systems
 			};
 			m_Candidates = new NativeList<Entity>(65536, Allocator.Persistent);
 			m_Cursor = -1;
+			m_RepairCounters = new NativeArray<int>(kRepairSlots * 2, Allocator.Persistent, NativeArrayOptions.ClearMemory);
+			m_GridStats = new NativeArray<int>(kGridStatsSlots, Allocator.Persistent, NativeArrayOptions.ClearMemory);
 			m_OverlapQuery = GetEntityQuery(new EntityQueryDesc
 			{
 				All = new ComponentType[1]
@@ -328,6 +410,22 @@ namespace AccessAnarchy.Systems
 				}
 			});
 			RequireForUpdate(m_OverlapQuery);
+			// v0.8.0 主要重删闸门：逐条照抄原版 LaneOverlapSystem.m_UpdatedOwnersQuery
+			// （Game/Net/LaneOverlapSystem.cs:1893）。刻意不排除 Lane——原版的清单里
+			// edge/node/建筑都算 owner，我们只是拿它的 SubLane 缓冲找车道路径去重删，
+			// 过滤条件在 job 内部按车道类型判定。
+			m_RebuildOwnerQuery = GetEntityQuery(new EntityQueryDesc
+			{
+				All = new ComponentType[2]
+				{
+					ComponentType.ReadOnly<SubLane>(),
+					ComponentType.ReadOnly<Updated>()
+				},
+				None = new ComponentType[1]
+				{
+					ComponentType.ReadOnly<Deleted>()
+				}
+			});
 			m_OwnerQuery = GetEntityQuery(new EntityQueryDesc
 			{
 				All = new ComponentType[1]
@@ -377,11 +475,24 @@ namespace AccessAnarchy.Systems
 			{
 				m_Candidates.Dispose();
 			}
+			if (m_RepairCounters.IsCreated)
+			{
+				m_RepairCounters.Dispose();
+			}
+			if (m_GridStats.IsCreated)
+			{
+				m_GridStats.Dispose();
+			}
 			base.OnDestroy();
 		}
 
 		protected override void OnUpdate()
 		{
+			if (!m_KeyReported)
+			{
+				m_KeyReported = true;
+				Setting.ReportKeyBindings("in-game");
+			}
 			Setting setting = Setting.Instance;
 			bool enabled = setting != null && setting.Enabled;
 			if (!enabled)
@@ -430,6 +541,9 @@ namespace AccessAnarchy.Systems
 			else if (m_TotalPasses % kHeartbeatInterval == 0)
 			{
 				LogStatus("heartbeat", globalMode);
+				// 心跳时顺带把两个自证指标读掉并清零（内部会先 Complete 依赖，所以每 ~30 秒
+				// 预期有一次极短的等待；稳态下没有长任务在飞，等待时间在亚毫秒级）。
+				ReportRebuildDiagnostics(globalMode);
 			}
 
 			// 启用后第一遍此刻还没删过任何条目（本帧的删除要到帧末 ECB 回放才生效），
@@ -445,9 +559,7 @@ namespace AccessAnarchy.Systems
 
 			// 锚点网格 + 邻域集合：低频整轮重建。不再每帧增量扫全城做 IsNearAnchor。
 			// 模式/范围开关变化时立刻作废，并走「先让原版重建、再按新范围重删」一轮。
-			int includeMask = (setting.IncludeGarageLanes ? 1 : 0)
-				| (setting.IncludeConnectionLanes ? 2 : 0)
-				| (setting.IncludeParkingLotLanes ? 4 : 0);
+			int includeMask = setting.IncludeMask;
 			if (setting.Mode != m_LastMode || includeMask != m_LastIncludeMask)
 			{
 				// 只有"范围变窄"才需要还原重刷：变宽时多删几条就行，变窄时先前删过的范围外车道
@@ -501,6 +613,49 @@ namespace AccessAnarchy.Systems
 			EntityCommandBuffer.ParallelWriter ecb = m_EndFrameBarrier.CreateCommandBuffer().AsParallelWriter();
 			bool scheduled = false;
 
+			// (0) v0.8.0 主机制：跟随原版重建闸门重删。
+			// 原版 LaneOverlapSystem 在 Modification4B（本阶段之前）把这一批 owner 的 SubLane
+			// 逐条 Clear 后重算 overlap，我们删掉的行人条目就是在这一刻回来的；它不给车道打 Updated，
+			// 所以只看车道 Updated 的 (3) 收不到这批车道 → 出入口会在下一次集合整轮重建
+			// （kSetRebuildInterval=2048 帧 ≈ 34 秒）之前一直恢复避让，这正是「个别停车场出入口仍会避让」；
+			// 全局模式更糟：它没有周期性重删，条目一旦回来就永远回来。
+			// 现在用与原版同一个闸门、同一批实体（owner 的 SubLane + Updated 节点的相邻 edge），
+			// 当帧按同一套判定重删；没被改写过的车道被 HasPedestrianOverlap 直接跳过，不产生写入。
+			if (!m_RebuildOwnerQuery.IsEmptyIgnoreFilter)
+			{
+				m_GateFrames++;
+				m_GateLastOwners = m_RebuildOwnerQuery.CalculateEntityCount();
+				StripRebuiltLanesJob rebuildJob = new StripRebuiltLanesJob
+				{
+					m_EntityType = GetEntityTypeHandle(),
+					m_SubLanes = GetBufferLookup<SubLane>(isReadOnly: true),
+					m_ConnectedEdges = GetBufferLookup<ConnectedEdge>(isReadOnly: true),
+					m_UpdatedData = GetComponentLookup<Updated>(isReadOnly: true),
+					m_Overlaps = GetBufferLookup<LaneOverlap>(isReadOnly: true),
+					m_PedestrianLaneData = GetComponentLookup<PedestrianLane>(isReadOnly: true),
+					m_ConnectionLaneData = GetComponentLookup<ConnectionLane>(isReadOnly: true),
+					m_GarageLaneData = GetComponentLookup<GarageLane>(isReadOnly: true),
+					m_AreaLaneData = GetComponentLookup<AreaLane>(isReadOnly: true),
+					m_CarLaneData = GetComponentLookup<CarLane>(isReadOnly: true),
+					m_ParkingLaneData = GetComponentLookup<ParkingLane>(isReadOnly: true),
+					m_OwnerData = GetComponentLookup<Owner>(isReadOnly: true),
+					m_EdgeData = GetComponentLookup<Edge>(isReadOnly: true),
+					m_NodeData = GetComponentLookup<Node>(isReadOnly: true),
+					m_CurveData = GetComponentLookup<Curve>(isReadOnly: true),
+					m_CarFacilityData = GetComponentLookup<CarParkingFacility>(isReadOnly: true),
+					m_ParkingFacilityData = GetComponentLookup<ParkingFacility>(isReadOnly: true),
+					m_Grid = m_AnchorGrid,
+					m_AccessVehicleSet = globalMode ? default : m_VehicleSets[m_ActiveSetIndex],
+					m_Mode = setting.Mode,
+					m_IncludeMask = includeMask,
+					m_IncludeCrosswalks = globalMode ? 1 : 0,
+					m_Ecb = ecb,
+					m_RepairCounters = m_RepairCounters
+				};
+				Dependency = rebuildJob.ScheduleParallel(m_RebuildOwnerQuery, Dependency);
+				scheduled = true;
+			}
+
 			// (1) 全局模式首次全量
 			if (globalMode && !m_InitialGlobalApplyDone)
 			{
@@ -520,12 +675,15 @@ namespace AccessAnarchy.Systems
 					m_AreaLaneType = GetComponentTypeHandle<AreaLane>(isReadOnly: true),
 					m_OverlapType = GetBufferTypeHandle<LaneOverlap>(isReadOnly: true),
 					m_CurveData = GetComponentLookup<Curve>(isReadOnly: true),
+					m_CarLaneData = GetComponentLookup<CarLane>(isReadOnly: true),
+					m_ParkingLaneData = GetComponentLookup<ParkingLane>(isReadOnly: true),
+					m_AreaLaneData = GetComponentLookup<AreaLane>(isReadOnly: true),
+					m_CarFacilityData = GetComponentLookup<CarParkingFacility>(isReadOnly: true),
+					m_ParkingFacilityData = GetComponentLookup<ParkingFacility>(isReadOnly: true),
 					m_Grid = m_AnchorGrid,
 					m_AccessVehicleSet = default,
 					m_Mode = setting.Mode,
-					m_IncludeGarage = setting.IncludeGarageLanes ? 1 : 0,
-					m_IncludeConnections = setting.IncludeConnectionLanes ? 1 : 0,
-					m_IncludeParkingLots = setting.IncludeParkingLotLanes ? 1 : 0,
+					m_IncludeMask = includeMask,
 					m_IncludeCrosswalks = 1,
 					m_Ecb = ecb
 				};
@@ -569,12 +727,15 @@ namespace AccessAnarchy.Systems
 					m_AreaLaneType = GetComponentTypeHandle<AreaLane>(isReadOnly: true),
 					m_OverlapType = GetBufferTypeHandle<LaneOverlap>(isReadOnly: true),
 					m_CurveData = GetComponentLookup<Curve>(isReadOnly: true),
+					m_CarLaneData = GetComponentLookup<CarLane>(isReadOnly: true),
+					m_ParkingLaneData = GetComponentLookup<ParkingLane>(isReadOnly: true),
+					m_AreaLaneData = GetComponentLookup<AreaLane>(isReadOnly: true),
+					m_CarFacilityData = GetComponentLookup<CarParkingFacility>(isReadOnly: true),
+					m_ParkingFacilityData = GetComponentLookup<ParkingFacility>(isReadOnly: true),
 					m_Grid = m_AnchorGrid,
 					m_AccessVehicleSet = globalMode ? default : m_VehicleSets[m_ActiveSetIndex],
 					m_Mode = setting.Mode,
-					m_IncludeGarage = setting.IncludeGarageLanes ? 1 : 0,
-					m_IncludeConnections = setting.IncludeConnectionLanes ? 1 : 0,
-					m_IncludeParkingLots = setting.IncludeParkingLotLanes ? 1 : 0,
+					m_IncludeMask = includeMask,
 					m_IncludeCrosswalks = globalMode ? 1 : 0,
 					m_Ecb = ecb
 				};
@@ -586,6 +747,69 @@ namespace AccessAnarchy.Systems
 			{
 				m_EndFrameBarrier.AddJobHandleForProducer(Dependency);
 			}
+		}
+
+		/// <summary>
+		/// 心跳自证日志（v0.8.0）。用户回报「某个出入口仍会避让」时先看这三行：
+		/// ① Rebuild gate —— 原版这一阵子改写过 overlap 没有、我们跟上了多少；
+		/// ② Anchor grid —— 锚点容量有没有被卡掉（卡掉就会有邻近车道判不出靠出入口）；
+		/// ③ Access set audit —— 集合内的车辆车道此刻还留着几条行人条目。
+		/// ①非零而③也非零 = 我们没跟全（漏口还在）；①=0 且③=0 却仍然避让 = 不是 LaneOverlap 这条通道，
+		/// 而是类注释 v0.7.2 里保留的原版行为（行人就站在车道本体上、或行人静止不动被当成静态障碍）。
+		/// </summary>
+		private void ReportRebuildDiagnostics(bool globalMode)
+		{
+			// 读 job 写过的计数数组之前必须等在飞的 job 收尾（与 ScanPedestrianOverlaps 同一套做法）。
+			Dependency.Complete();
+			int lanes = 0;
+			int entries = 0;
+			for (int i = 0; i < kRepairSlots; i++)
+			{
+				lanes += m_RepairCounters[i * 2];
+				entries += m_RepairCounters[i * 2 + 1];
+				m_RepairCounters[i * 2] = 0;
+				m_RepairCounters[i * 2 + 1] = 0;
+			}
+			AccessAnarchyMod.log.Info($"Rebuild gate: {m_GateFrames} frame(s) with vanilla LaneOverlap rebuild this period, last gate {m_GateLastOwners} owner(s); re-stripped {lanes} lane(s) / {entries} pedestrian entries (lower bound, {kRepairSlots} slots).");
+			m_GateFrames = 0;
+			m_GateLastOwners = 0;
+
+			int dropped = m_GridStats.IsCreated ? m_GridStats[0] : 0;
+			if (dropped > 0)
+			{
+				AccessAnarchyMod.log.Warn($"Anchor grid capacity hit: {dropped} anchor point(s) dropped last grid rebuild (max {m_GridStats[1]} per cell, {m_GridStats[2]} anchors in {m_GridStats[3]} cells) - lanes near a crowded access cluster may stay un-stripped. Please send this line.");
+			}
+
+			if (!globalMode && m_SetsInitialized)
+			{
+				AuditAccessSet();
+			}
+		}
+
+		/// <summary>邻域集合当前是不是干净的（成本 O(集合)，不是 O(全城)）。</summary>
+		private void AuditAccessSet()
+		{
+			NativeHashSet<Entity> set = m_VehicleSets[m_ActiveSetIndex];
+			if (!set.IsCreated || set.Count == 0)
+			{
+				return;
+			}
+			NativeArray<int> counters = new NativeArray<int>(2, Allocator.TempJob);
+			AuditAccessSetJob auditJob = new AuditAccessSetJob
+			{
+				m_Set = set,
+				m_Overlaps = GetBufferLookup<LaneOverlap>(isReadOnly: true),
+				m_PedestrianLaneData = GetComponentLookup<PedestrianLane>(isReadOnly: true),
+				m_ConnectionLaneData = GetComponentLookup<ConnectionLane>(isReadOnly: true),
+				m_Counters = counters
+			};
+			// 把 Dependency 传进去（而不是 Schedule()）：这样 ECS 安全检查知道这次读挂在本系统的
+			// 依赖链上，与 ScanPedestrianOverlaps 里 ScheduleParallel(q, Dependency) 同一套做法。
+			auditJob.Schedule(Dependency).Complete();
+			int lanesWithEntries = counters[0];
+			int entries = counters[1];
+			counters.Dispose();
+			AccessAnarchyMod.log.Info($"Access set audit: {lanesWithEntries} of {set.Count} vehicle lanes still hold {entries} pedestrian overlap entries (0 = clean, crosswalk entries excluded by design).");
 		}
 
 		private void LogStatus(string tag, bool globalMode)
@@ -812,6 +1036,8 @@ namespace AccessAnarchy.Systems
 		/// </summary>
 		private bool AdvanceAccessSets(Setting setting, uint frameIndex)
 		{
+			// 锚点网格与邻域集合都按当下勾选掩码收集；掩码一变，OnUpdate 会作废整轮并排重建。
+			int includeMask = setting.IncludeMask;
 			if (m_BuildInProgress && m_Cursor >= 0 && m_Cursor >= m_Candidates.Length)
 			{
 				// 本轮扫完：交换双缓冲，活跃集可用。
@@ -845,7 +1071,19 @@ namespace AccessAnarchy.Systems
 				{
 					m_Entities = m_AnchorQuery.ToEntityArray(Allocator.TempJob),
 					m_CurveData = GetComponentLookup<Curve>(isReadOnly: true),
-					m_Grid = m_AnchorGrid
+					m_GarageLaneData = GetComponentLookup<GarageLane>(isReadOnly: true),
+					m_ConnectionLaneData = GetComponentLookup<ConnectionLane>(isReadOnly: true),
+					m_AreaLaneData = GetComponentLookup<AreaLane>(isReadOnly: true),
+					m_CarLaneData = GetComponentLookup<CarLane>(isReadOnly: true),
+					m_ParkingLaneData = GetComponentLookup<ParkingLane>(isReadOnly: true),
+					m_OwnerData = GetComponentLookup<Owner>(isReadOnly: true),
+					m_EdgeData = GetComponentLookup<Edge>(isReadOnly: true),
+					m_NodeData = GetComponentLookup<Node>(isReadOnly: true),
+					m_CarFacilityData = GetComponentLookup<CarParkingFacility>(isReadOnly: true),
+					m_ParkingFacilityData = GetComponentLookup<ParkingFacility>(isReadOnly: true),
+					m_IncludeMask = includeMask,
+					m_Grid = m_AnchorGrid,
+					m_Stats = m_GridStats
 				};
 				Dependency = buildJob.Schedule(Dependency);
 
@@ -878,9 +1116,9 @@ namespace AccessAnarchy.Systems
 				m_OwnerData = GetComponentLookup<Owner>(isReadOnly: true),
 				m_EdgeData = GetComponentLookup<Edge>(isReadOnly: true),
 				m_NodeData = GetComponentLookup<Node>(isReadOnly: true),
-				m_IncludeGarage = setting.IncludeGarageLanes ? 1 : 0,
-				m_IncludeConnections = setting.IncludeConnectionLanes ? 1 : 0,
-				m_IncludeParkingLots = setting.IncludeParkingLotLanes ? 1 : 0,
+				m_CarFacilityData = GetComponentLookup<CarParkingFacility>(isReadOnly: true),
+				m_ParkingFacilityData = GetComponentLookup<ParkingFacility>(isReadOnly: true),
+				m_IncludeMask = includeMask,
 				m_Grid = m_AnchorGrid,
 				m_BuildVehicleSet = m_VehicleSets[1 - m_ActiveSetIndex]
 			};
@@ -894,14 +1132,129 @@ namespace AccessAnarchy.Systems
 			return (int2)math.floor(position.xz / kGridCellSize);
 		}
 
-		/// <summary>曲线是否邻近任何出入口锚点（端点+中点的 3×3 邻域 + 距离校验）。</summary>
+		/// <summary>曲线是否邻近任何出入口锚点。v0.8.0 起采样点与 BuildAnchorGridJob 放锚点时用的
+		/// 五个点一致（两端 + 两个四分位 + 弦中点）：原来这里只取 a/d/弦中点三个，
+		/// 而长或弯的引道「弦中点」会明显偏离曲线本体，出入口正好落在偏离段上时这条车道
+		/// 就既进不了邻域集合、也过不了逐帧锚点判定 → 永久漏删。</summary>
 		private static bool IsNearAnchor(Bezier4x3 bezier, NativeHashMap<int2, FixedList128Bytes<float2>> grid)
 		{
-			if (IsNearAnchor(bezier.a, grid) || IsNearAnchor(bezier.d, grid) || IsNearAnchor(0.5f * (bezier.a + bezier.d), grid))
+			if (IsNearAnchor(bezier.a, grid)
+				|| IsNearAnchor(0.25f * (bezier.a + bezier.b + bezier.b + bezier.c), grid)
+				|| IsNearAnchor(0.5f * (bezier.a + bezier.d), grid)
+				|| IsNearAnchor(0.25f * (bezier.b + bezier.c + bezier.c + bezier.d), grid)
+				|| IsNearAnchor(bezier.d, grid))
 			{
 				return true;
 			}
 			return false;
+		}
+
+		/// <summary>
+		/// 随机访问（不是 chunk 遍历）版本的「这条车道在不避让范围内吗」。三份判定必须语义一致：
+		/// 这里、BuildAccessSetsJob.IsAccessType、StripPedestrianOverlapsJob（全局模式走 chunk 版
+		/// IsGlobalLaneByChunk，出入口模式调本方法）。不一致就会出现
+		/// "进了集合却判不成范围内"这类互相漏口的现象。
+		/// 全局模式：所有车辆车道（含指向人行横道的条目，见 v0.7.7）。
+		/// 出入口模式：类型属于某个已勾选类别 / 邻域集合成员 / 锚点邻域，三选一。
+		/// </summary>
+		private static bool IsInNoYieldScope(Entity lane, int mode, int includeMask, NativeHashSet<Entity> vehicleSet,
+			ComponentLookup<Curve> curveData, NativeHashMap<int2, FixedList128Bytes<float2>> grid,
+			ComponentLookup<GarageLane> garageData, ComponentLookup<ConnectionLane> connectionData,
+			ComponentLookup<AreaLane> areaData, ComponentLookup<CarLane> carData, ComponentLookup<ParkingLane> parkingData,
+			ComponentLookup<Owner> ownerData, ComponentLookup<Edge> edgeData, ComponentLookup<Node> nodeData,
+			ComponentLookup<CarParkingFacility> carFacilityData, ComponentLookup<ParkingFacility> facilityData)
+		{
+			if (mode == Setting.kModeGlobal)
+			{
+				if (carData.HasComponent(lane) || parkingData.HasComponent(lane) || garageData.HasComponent(lane)
+					|| areaData.HasComponent(lane))
+				{
+					return true;
+				}
+				if (connectionData.TryGetComponent(lane, out ConnectionLane globalConn)
+					&& (globalConn.m_Flags & (ConnectionLaneFlags.Road | ConnectionLaneFlags.Track | ConnectionLaneFlags.Parking)) != 0)
+				{
+					return true;
+				}
+				return false;
+			}
+			int category = LaneCategory(lane, garageData, connectionData, areaData, carData, parkingData,
+				ownerData, edgeData, nodeData, carFacilityData, facilityData);
+			if (category != 0 && (includeMask & category) != 0)
+			{
+				return true;
+			}
+			if (vehicleSet.IsCreated && vehicleSet.Contains(lane))
+			{
+				return true;
+			}
+			if (curveData.TryGetComponent(lane, out Curve curve) && IsNearAnchor(curve.m_Bezier, grid))
+			{
+				return true;
+			}
+			return false;
+		}
+
+		/// <summary>
+		/// 车道属于三类中的哪一类（Setting.kCatParking / kCatBuildingAccess / kCatBuildingInternal，0=不属于）。
+		///
+		/// 停车场这一维**不能**靠车道组件区分：地面停车场的出入口连接道和商店的出入连接道是同一个东西
+		/// （RoadConnectionSystem.cs:1356-1363 给两者的 flags 都是 Inside|Road），
+		/// ConnectionLaneFlags.Parking 标的是车位/自行车架那种 berth 链接（:1370-1391），
+		/// 停车场大门口那条路反而没有它。所以看**所属建筑**：
+		/// 建筑出入车道的 Owner 直接就是建筑实体（RoadConnectionSystem.cs:1332 `new Owner(building)`），
+		/// 而只有停车场/停车楼这类建筑才带 Game.Buildings.ParkingFacility / CarParkingFacility
+		/// ——反证在 ParkingLaneDataSystem.cs:405-418：没有 ParkingFacilityData 的建筑（商店/办公/工业）
+		/// 会退化到用 BuildingPropertyData.m_SpaceMultiplier 或 WorkplaceData.m_MaxWorkers/20 估容量，
+		/// 说明游戏自己就是拿这个组件区分"是不是停车场"。
+		/// 这样勾「建筑与外部道路车辆出入口」不会连带把停车场出入口也取消避让（作者 2026-09-25 的硬要求）。
+		/// </summary>
+		private static int LaneCategory(Entity lane, ComponentLookup<GarageLane> garageData,
+			ComponentLookup<ConnectionLane> connectionData, ComponentLookup<AreaLane> areaData,
+			ComponentLookup<CarLane> carData, ComponentLookup<ParkingLane> parkingData,
+			ComponentLookup<Owner> ownerData, ComponentLookup<Edge> edgeData, ComponentLookup<Node> nodeData,
+			ComponentLookup<CarParkingFacility> carFacilityData, ComponentLookup<ParkingFacility> facilityData)
+		{
+			bool isGarage = garageData.HasComponent(lane);
+			bool isConnection = connectionData.HasComponent(lane);
+			bool isArea = areaData.HasComponent(lane);
+			bool isCarOrParking = carData.HasComponent(lane) || parkingData.HasComponent(lane);
+			if (isGarage)
+			{
+				return Setting.kCatParking;
+			}
+			if (IsParkingFacilityOwned(lane, ownerData, carFacilityData, facilityData))
+			{
+				if (isConnection || isArea || isCarOrParking)
+				{
+					return Setting.kCatParking;
+				}
+				return 0;
+			}
+			if (isConnection)
+			{
+				return Setting.kCatBuildingAccess;
+			}
+			if (isArea)
+			{
+				return Setting.kCatBuildingInternal;
+			}
+			if (isCarOrParking && IsBuildingOwned(lane, ownerData, edgeData, nodeData))
+			{
+				return Setting.kCatBuildingInternal;
+			}
+			return 0;
+		}
+
+		/// <summary>车道所属实体是不是停车场/停车楼建筑。</summary>
+		private static bool IsParkingFacilityOwned(Entity lane, ComponentLookup<Owner> ownerData,
+			ComponentLookup<CarParkingFacility> carFacilityData, ComponentLookup<ParkingFacility> facilityData)
+		{
+			if (!ownerData.TryGetComponent(lane, out Owner owner) || owner.m_Owner == Entity.Null)
+			{
+				return false;
+			}
+			return carFacilityData.HasComponent(owner.m_Owner) || facilityData.HasComponent(owner.m_Owner);
 		}
 
 		private static bool IsNearAnchor(float3 position, NativeHashMap<int2, FixedList128Bytes<float2>> grid)
@@ -928,37 +1281,18 @@ namespace AccessAnarchy.Systems
 			return false;
 		}
 
-		private static bool IsAccessLaneByType(int mode, int includeGarage, int includeConnections, int includeParkingLots,
-			bool chunkHasCarLane, bool chunkHasParking, bool chunkHasGarage, bool chunkHasConnection, bool chunkHasArea,
-			NativeArray<ConnectionLane> connectionArray, int i, Entity lane, ComponentLookup<Owner> ownerData,
-			ComponentLookup<Edge> edgeData, ComponentLookup<Node> nodeData)
+		/// <summary>全局模式的 chunk 级快速类型判定：任何车辆车道（CarLane/ParkingLane/GarageLane/AreaLane，
+		/// 以及带 Road/Track/Parking  flags 的 ConnectionLane）一律在范围内。
+		/// 出入口模式不走这里——那份判定要看三类勾选与所属建筑是不是停车场，
+		/// 统一在 <see cref="IsInNoYieldScope"/> 里（需要逐车道的 ComponentLookup，没法用 chunk flag 代替）。</summary>
+		private static bool IsGlobalLaneByChunk(bool chunkHasCarLane, bool chunkHasParking, bool chunkHasGarage,
+			bool chunkHasConnection, bool chunkHasArea, NativeArray<ConnectionLane> connectionArray, int i)
 		{
-			if (mode == Setting.kModeGlobal)
-			{
-				if (chunkHasCarLane || chunkHasParking || chunkHasGarage || chunkHasArea)
-				{
-					return true;
-				}
-				if (chunkHasConnection && (connectionArray[i].m_Flags & (ConnectionLaneFlags.Road | ConnectionLaneFlags.Track | ConnectionLaneFlags.Parking)) != 0)
-				{
-					return true;
-				}
-				return false;
-			}
-			if (includeGarage != 0 && chunkHasGarage)
+			if (chunkHasCarLane || chunkHasParking || chunkHasGarage || chunkHasArea)
 			{
 				return true;
 			}
-			if (includeConnections != 0 && chunkHasConnection)
-			{
-				return true;
-			}
-			if (includeParkingLots != 0 && chunkHasArea)
-			{
-				return true;
-			}
-			if (includeParkingLots != 0 && (chunkHasCarLane || chunkHasParking) && !chunkHasGarage && !chunkHasConnection
-				&& IsBuildingOwned(lane, ownerData, edgeData, nodeData))
+			if (chunkHasConnection && (connectionArray[i].m_Flags & (ConnectionLaneFlags.Road | ConnectionLaneFlags.Track | ConnectionLaneFlags.Parking)) != 0)
 			{
 				return true;
 			}
@@ -1063,7 +1397,16 @@ namespace AccessAnarchy.Systems
 			}
 		}
 
-		/// <summary>收集出入口锚点（连接道/车库坡道/区域车道的曲线控制点）到网格。</summary>
+		/// <summary>
+		/// 收集出入口锚点（连接道/车库坡道/区域车道的曲线控制点）到网格。
+		/// 五个采样点与判定侧 <see cref="IsNearAnchor(Bezier4x3, NativeHashMap{int2, FixedList128Bytes{float2}})"/> 一致。
+		///
+		/// v0.8.0 关键修正：锚点按 Setting.IncludeMask 过滤后才入网格。
+		/// 之前这个网格不分类型地收下所有 Garage/Connection/Area 车道的曲线，而出入口模式的判定是
+		/// 「类型 / 集合成员 / 锚点邻域」三选一——勾掉任何一类，邻近的其它类锚点照样命中锚点邻域，
+		/// 于是三个勾选框实测完全无效（作者 2026-09-25 反馈）。勾选变化会走
+		/// OnUpdate 的 includeMask 分支重排整轮重建，所以这里按当下掩码收集即可。
+		/// </summary>
 		[BurstCompile]
 		private struct BuildAnchorGridJob : IJob
 		{
@@ -1074,14 +1417,66 @@ namespace AccessAnarchy.Systems
 			[ReadOnly]
 			public ComponentLookup<Curve> m_CurveData;
 
+			[ReadOnly]
+			public ComponentLookup<GarageLane> m_GarageLaneData;
+
+			[ReadOnly]
+			public ComponentLookup<ConnectionLane> m_ConnectionLaneData;
+
+			[ReadOnly]
+			public ComponentLookup<AreaLane> m_AreaLaneData;
+
+			[ReadOnly]
+			public ComponentLookup<CarLane> m_CarLaneData;
+
+			[ReadOnly]
+			public ComponentLookup<ParkingLane> m_ParkingLaneData;
+
+			[ReadOnly]
+			public ComponentLookup<Owner> m_OwnerData;
+
+			[ReadOnly]
+			public ComponentLookup<Edge> m_EdgeData;
+
+			[ReadOnly]
+			public ComponentLookup<Node> m_NodeData;
+
+			[ReadOnly]
+			public ComponentLookup<CarParkingFacility> m_CarFacilityData;
+
+			[ReadOnly]
+			public ComponentLookup<ParkingFacility> m_ParkingFacilityData;
+
+			public int m_IncludeMask;
+
 			public NativeHashMap<int2, FixedList128Bytes<float2>> m_Grid;
+
+			/// <summary>诊断输出槽（见 kGridStatsSlots）。单线程 job，整轮重建时一次性赋值。</summary>
+			public NativeArray<int> m_Stats;
+
+			private int m_Dropped;
+			private int m_MaxCell;
+			private int m_Anchors;
+			private int m_Cells;
 
 			public void Execute()
 			{
 				m_Grid.Clear();
+				m_Dropped = 0;
+				m_MaxCell = 0;
+				m_Anchors = 0;
+				m_Cells = 0;
 				for (int i = 0; i < m_Entities.Length; i++)
 				{
-					if (!m_CurveData.TryGetComponent(m_Entities[i], out Curve curve))
+					Entity lane = m_Entities[i];
+					int category = LaneCategory(lane, m_GarageLaneData, m_ConnectionLaneData, m_AreaLaneData,
+						m_CarLaneData, m_ParkingLaneData, m_OwnerData, m_EdgeData, m_NodeData,
+						m_CarFacilityData, m_ParkingFacilityData);
+					if (category == 0 || (m_IncludeMask & category) == 0)
+					{
+						continue;
+					}
+					if (!m_CurveData.TryGetComponent(lane, out Curve curve))
 					{
 						continue;
 					}
@@ -1092,8 +1487,20 @@ namespace AccessAnarchy.Systems
 					AddAnchor(0.25f * (bezier.b + bezier.c + bezier.c + bezier.d));
 					AddAnchor(bezier.d);
 				}
+				if (m_Stats.IsCreated)
+				{
+					m_Stats[0] = m_Dropped;
+					m_Stats[1] = m_MaxCell;
+					m_Stats[2] = m_Anchors;
+					m_Stats[3] = m_Cells;
+				}
 			}
 
+			/// <summary>FixedList128Bytes 装满 15 个 float2 就到 128 字节上限（留一个槽给长度前缀 → 14），
+			/// 所以下面的截断不是可调参数而是容器硬限制。大停车场里 AreaLane 密布，一个 32×32 米格子
+			/// 超过 14 个采样点是会发生的，而被丢掉的锚点会让邻近车道判不出「靠出入口太近」→ 漏删。
+			/// v0.8.0 先把丢掉的量测出来（心跳日志 Anchor grid capacity 那行），拿到实机数据再决定
+			/// 换成不设上限的结构（CSR 或 MultiHashMap），不在没有证据时改判定半径。</summary>
 			private void AddAnchor(float3 position)
 			{
 				int2 key = GridKey(position);
@@ -1103,9 +1510,19 @@ namespace AccessAnarchy.Systems
 				}
 				if (list.Length >= 14)
 				{
+					m_Dropped++;
 					return;
 				}
+				if (list.Length == 0)
+				{
+					m_Cells++;
+				}
 				list.Add(position.xz);
+				m_Anchors++;
+				if (list.Length > m_MaxCell)
+				{
+					m_MaxCell = list.Length;
+				}
 				m_Grid[key] = list;
 			}
 		}
@@ -1149,11 +1566,14 @@ namespace AccessAnarchy.Systems
 			[ReadOnly]
 			public ComponentLookup<Node> m_NodeData;
 
-			public int m_IncludeGarage;
+			[ReadOnly]
+			public ComponentLookup<CarParkingFacility> m_CarFacilityData;
 
-			public int m_IncludeConnections;
+			[ReadOnly]
+			public ComponentLookup<ParkingFacility> m_ParkingFacilityData;
 
-			public int m_IncludeParkingLots;
+			/// <summary>Setting.IncludeMask：只把被勾选类别的车道收进邻域集合。</summary>
+			public int m_IncludeMask;
 
 			[ReadOnly]
 			public NativeHashMap<int2, FixedList128Bytes<float2>> m_Grid;
@@ -1175,50 +1595,230 @@ namespace AccessAnarchy.Systems
 				}
 			}
 
+			/// <summary>本候选车道的类别有没有被勾选。与 IsInNoYieldScope 的类型分支同一套判据。</summary>
 			private bool IsAccessType(Entity lane)
 			{
-				if (m_IncludeGarage != 0 && m_GarageLaneData.HasComponent(lane))
-				{
-					return true;
-				}
-				if (m_IncludeConnections != 0 && m_ConnectionLaneData.HasComponent(lane))
-				{
-					return true;
-				}
-				if (m_IncludeParkingLots != 0)
-				{
-					if (m_AreaLaneData.HasComponent(lane))
-					{
-						return true;
-					}
-					if ((m_CarLaneData.HasComponent(lane) || m_ParkingLaneData.HasComponent(lane))
-						&& !m_GarageLaneData.HasComponent(lane) && !m_ConnectionLaneData.HasComponent(lane)
-						&& IsBuildingOwned(lane))
-					{
-						return true;
-					}
-				}
-				return false;
+				int category = LaneCategory(lane, m_GarageLaneData, m_ConnectionLaneData, m_AreaLaneData,
+					m_CarLaneData, m_ParkingLaneData, m_OwnerData, m_EdgeData, m_NodeData,
+					m_CarFacilityData, m_ParkingFacilityData);
+				return category != 0 && (m_IncludeMask & category) != 0;
 			}
 
-			private bool IsBuildingOwned(Entity lane)
-			{
-				if (!m_OwnerData.TryGetComponent(lane, out Owner owner) || owner.m_Owner == Entity.Null)
-				{
-					return false;
-				}
-				Entity ownerEntity = owner.m_Owner;
-				return !m_EdgeData.HasComponent(ownerEntity) && !m_NodeData.HasComponent(ownerEntity);
-			}
-
+			/// <summary>直接委托给系统级实现，避免各 job 里再抄一份采样点列表
+			/// （v0.8.0 之前这三份 wrapper 各自写死 3 个采样点，与放锚点的 5 个点不一致）。</summary>
 			private static bool IsNearAnchor(Bezier4x3 bezier, NativeHashMap<int2, FixedList128Bytes<float2>> grid)
 			{
-				if (AccessZoneOverlapSystem.IsNearAnchor(bezier.a, grid) || AccessZoneOverlapSystem.IsNearAnchor(bezier.d, grid)
-					|| AccessZoneOverlapSystem.IsNearAnchor(0.5f * (bezier.a + bezier.d), grid))
+				return AccessZoneOverlapSystem.IsNearAnchor(bezier, grid);
+			}
+		}
+
+		/// <summary>
+		/// v0.8.0 新增（停车场出入口仍会避让的根因修复）：跟随原版重建闸门的主动重删。
+		///
+		/// 遍历对象与原版 LaneOverlapSystem.UpdateLaneOverlapsJob 完全一致——
+		/// 本帧带 Updated 的 owner 的 SubLane 缓冲，外加 AddNonUpdatedEdgesJob
+		/// （LaneOverlapSystem.cs:26-54）会被拉进原版清单的那批「自身未 Updated 的相邻 edge」的 SubLane。
+		/// 原版对这批实体是 `bufferData.Clear()` 后整表重算（:1077 → :1400/:1420），
+		/// 我们删掉的行人条目就是在 Modification4B 那一刻回来的，而它不会给车道打 Updated，
+		/// 所以只认车道 Updated 的旧路径收不到 → 那些出入口在下一次集合整轮重建前恢复避让。
+		///
+		/// 判据本身沿用与 (3) 相同的三重测试；没被原版改写过（或改写后确实没有行人条目）的车道
+		/// 在行人条目计数为 0 时直接返回，不产生任何 ECB 写入，所以不会退回 v0.7.1 那种每帧写战。
+		/// </summary>
+		[BurstCompile]
+		private struct StripRebuiltLanesJob : IJobChunk
+		{
+			[ReadOnly]
+			public EntityTypeHandle m_EntityType;
+
+			[ReadOnly]
+			public BufferLookup<SubLane> m_SubLanes;
+
+			[ReadOnly]
+			public BufferLookup<ConnectedEdge> m_ConnectedEdges;
+
+			[ReadOnly]
+			public ComponentLookup<Updated> m_UpdatedData;
+
+			[ReadOnly]
+			public BufferLookup<LaneOverlap> m_Overlaps;
+
+			[ReadOnly]
+			public ComponentLookup<PedestrianLane> m_PedestrianLaneData;
+
+			[ReadOnly]
+			public ComponentLookup<ConnectionLane> m_ConnectionLaneData;
+
+			[ReadOnly]
+			public ComponentLookup<GarageLane> m_GarageLaneData;
+
+			[ReadOnly]
+			public ComponentLookup<AreaLane> m_AreaLaneData;
+
+			[ReadOnly]
+			public ComponentLookup<CarLane> m_CarLaneData;
+
+			[ReadOnly]
+			public ComponentLookup<ParkingLane> m_ParkingLaneData;
+
+			[ReadOnly]
+			public ComponentLookup<Owner> m_OwnerData;
+
+			[ReadOnly]
+			public ComponentLookup<Edge> m_EdgeData;
+
+			[ReadOnly]
+			public ComponentLookup<Node> m_NodeData;
+
+			[ReadOnly]
+			public ComponentLookup<Curve> m_CurveData;
+
+			[ReadOnly]
+			public NativeHashMap<int2, FixedList128Bytes<float2>> m_Grid;
+
+			[ReadOnly]
+			public NativeHashSet<Entity> m_AccessVehicleSet;
+
+			[ReadOnly]
+			public ComponentLookup<CarParkingFacility> m_CarFacilityData;
+
+			[ReadOnly]
+			public ComponentLookup<ParkingFacility> m_ParkingFacilityData;
+
+			public int m_Mode;
+
+			/// <summary>Setting.IncludeMask：三类不避让范围的勾选掩码。</summary>
+			public int m_IncludeMask;
+
+			public int m_IncludeCrosswalks;
+
+			public EntityCommandBuffer.ParallelWriter m_Ecb;
+
+			[NativeDisableParallelForRestriction]
+			public NativeArray<int> m_RepairCounters;
+
+			public void Execute(in ArchetypeChunk chunk, int unfilteredChunkIndex, bool useEnabledMask, in v128 chunkEnabledMask)
+			{
+				NativeArray<Entity> owners = chunk.GetNativeArray(m_EntityType);
+				// sortKey 与 (1)(2)(3) 那批用 unfilteredChunkIndex 的 job 隔开一个固定偏移：
+				// 两条路径可能对同一条车道同时 SetBuffer，内容都是从同一份快照算出来的幂等结果，
+				// 错开键位只是为了回放顺序可读，不承担正确性。
+				int sortKey = 1000000 + unfilteredChunkIndex;
+				int slot = (unfilteredChunkIndex % kRepairSlots) * 2;
+				for (int i = 0; i < chunk.Count; i++)
 				{
-					return true;
+					Entity owner = owners[i];
+					if (m_SubLanes.TryGetBuffer(owner, out DynamicBuffer<SubLane> subLanes))
+					{
+						for (int j = 0; j < subLanes.Length; j++)
+						{
+							StripLane(subLanes[j].m_SubLane, sortKey, slot);
+						}
+					}
+					if (!m_ConnectedEdges.TryGetBuffer(owner, out DynamicBuffer<ConnectedEdge> connectedEdges))
+					{
+						continue;
+					}
+					for (int k = 0; k < connectedEdges.Length; k++)
+					{
+						Entity neighbor = connectedEdges[k].m_Edge;
+						// 自身已 Updated 的相邻 edge 会在自己的 chunk 记录里被处理，跳过以免重复。
+						if (m_UpdatedData.HasComponent(neighbor))
+						{
+							continue;
+						}
+						if (!m_SubLanes.TryGetBuffer(neighbor, out DynamicBuffer<SubLane> neighborSubLanes))
+						{
+							continue;
+						}
+						for (int j = 0; j < neighborSubLanes.Length; j++)
+						{
+							StripLane(neighborSubLanes[j].m_SubLane, sortKey, slot);
+						}
+					}
 				}
-				return false;
+			}
+
+			private void StripLane(Entity lane, int sortKey, int slot)
+			{
+				if (!IsInNoYieldScope(lane, m_Mode, m_IncludeMask, m_AccessVehicleSet, m_CurveData, m_Grid,
+					m_GarageLaneData, m_ConnectionLaneData, m_AreaLaneData, m_CarLaneData, m_ParkingLaneData,
+					m_OwnerData, m_EdgeData, m_NodeData, m_CarFacilityData, m_ParkingFacilityData))
+				{
+					return;
+				}
+				if (!m_Overlaps.TryGetBuffer(lane, out DynamicBuffer<LaneOverlap> buffer) || buffer.Length == 0)
+				{
+					return;
+				}
+				int pedestrian = 0;
+				for (int j = 0; j < buffer.Length; j++)
+				{
+					if (IsPedestrianLaneEntity(buffer[j].m_Other, m_PedestrianLaneData, m_ConnectionLaneData, m_IncludeCrosswalks))
+					{
+						pedestrian++;
+					}
+				}
+				if (pedestrian == 0)
+				{
+					// 绝大多数车道停在这里就走：原版这一帧没改写它，或改写完本来就没有行人条目。
+					return;
+				}
+				// SetBuffer 是整表替换，所以保留项必须按原序全部补写回去。
+				DynamicBuffer<LaneOverlap> replacement = m_Ecb.SetBuffer<LaneOverlap>(sortKey, lane);
+				for (int j = 0; j < buffer.Length; j++)
+				{
+					if (!IsPedestrianLaneEntity(buffer[j].m_Other, m_PedestrianLaneData, m_ConnectionLaneData, m_IncludeCrosswalks))
+					{
+						replacement.Add(buffer[j]);
+					}
+				}
+				m_RepairCounters[slot]++;
+				m_RepairCounters[slot + 1] += pedestrian;
+			}
+		}
+
+		/// <summary>心跳自证用：统计邻域集合内的车辆车道当前还残留多少条行人 overlap 条目。
+		/// 出入口模式恒传 includeCrosswalks=0（横道条目我们本来就不动，算进去会永远非 0）。</summary>
+		[BurstCompile]
+		private struct AuditAccessSetJob : IJob
+		{
+			[ReadOnly]
+			public NativeHashSet<Entity> m_Set;
+
+			[ReadOnly]
+			public BufferLookup<LaneOverlap> m_Overlaps;
+
+			[ReadOnly]
+			public ComponentLookup<PedestrianLane> m_PedestrianLaneData;
+
+			[ReadOnly]
+			public ComponentLookup<ConnectionLane> m_ConnectionLaneData;
+
+			public NativeArray<int> m_Counters;
+
+			public void Execute()
+			{
+				foreach (Entity lane in m_Set)
+				{
+					if (!m_Overlaps.TryGetBuffer(lane, out DynamicBuffer<LaneOverlap> buffer) || buffer.Length == 0)
+					{
+						continue;
+					}
+					int hit = 0;
+					for (int j = 0; j < buffer.Length; j++)
+					{
+						if (IsPedestrianLaneEntity(buffer[j].m_Other, m_PedestrianLaneData, m_ConnectionLaneData, 0))
+						{
+							hit++;
+						}
+					}
+					if (hit > 0)
+					{
+						m_Counters[0]++;
+						m_Counters[1] += hit;
+					}
+				}
 			}
 		}
 
@@ -1342,13 +1942,25 @@ namespace AccessAnarchy.Systems
 			[ReadOnly]
 			public NativeHashSet<Entity> m_AccessVehicleSet;
 
+			[ReadOnly]
+			public ComponentLookup<CarLane> m_CarLaneData;
+
+			[ReadOnly]
+			public ComponentLookup<ParkingLane> m_ParkingLaneData;
+
+			[ReadOnly]
+			public ComponentLookup<AreaLane> m_AreaLaneData;
+
+			[ReadOnly]
+			public ComponentLookup<CarParkingFacility> m_CarFacilityData;
+
+			[ReadOnly]
+			public ComponentLookup<ParkingFacility> m_ParkingFacilityData;
+
 			public int m_Mode;
 
-			public int m_IncludeGarage;
-
-			public int m_IncludeConnections;
-
-			public int m_IncludeParkingLots;
+			/// <summary>Setting.IncludeMask：三类不避让范围的勾选掩码（出入口模式用；全局模式不看）。</summary>
+			public int m_IncludeMask;
 
 			/// <summary>是否连人行横道（PedestrianLaneFlags.Crosswalk）的条目一起删：
 			/// 全局模式 = 1（"全部道路"含横道），出入口模式 = 0（保留 v0.5 的横道误伤修复）。</summary>
@@ -1374,23 +1986,22 @@ namespace AccessAnarchy.Systems
 				for (int i = 0; i < chunk.Count; i++)
 				{
 					Entity lane = entities[i];
-					bool isAccess;
+					bool inScope;
 					if (m_Mode == Setting.kModeGlobal)
 					{
-						isAccess = IsAccessLaneByType(m_Mode, m_IncludeGarage, m_IncludeConnections, m_IncludeParkingLots,
-							chunkHasCarLane, chunkHasParking, chunkHasGarage, chunkHasConnection, chunkHasArea,
-							connectionArray, i, lane, m_OwnerData, m_EdgeData, m_NodeData);
+						// 全局模式：chunk 级类型快判（全城车辆车道一律删，不分三类）。
+						inScope = IsGlobalLaneByChunk(chunkHasCarLane, chunkHasParking, chunkHasGarage,
+							chunkHasConnection, chunkHasArea, connectionArray, i);
 					}
 					else
 					{
-						// access 模式三重判定：类型出入口 / 邻域集合成员 / 锚点邻域（捕捉新建道路）。
-						isAccess = IsAccessLaneByType(m_Mode, m_IncludeGarage, m_IncludeConnections, m_IncludeParkingLots,
-							chunkHasCarLane, chunkHasParking, chunkHasGarage, chunkHasConnection, chunkHasArea,
-							connectionArray, i, lane, m_OwnerData, m_EdgeData, m_NodeData)
-							|| m_AccessVehicleSet.Contains(lane)
-							|| (m_CurveData.TryGetComponent(lane, out Curve curve) && IsNearAnchorLocal(curve.m_Bezier, m_Grid));
+						// 出入口模式三重判定：已勾选类别的类型 / 邻域集合成员 / 锚点邻域。
+						// 与 BuildAccessSetsJob、StripRebuiltLanesJob 共用 IsInNoYieldScope，防止三份判定再度漂移。
+						inScope = IsInNoYieldScope(lane, m_Mode, m_IncludeMask, m_AccessVehicleSet, m_CurveData, m_Grid,
+							m_GarageLaneData, m_ConnectionLaneData, m_AreaLaneData, m_CarLaneData, m_ParkingLaneData,
+							m_OwnerData, m_EdgeData, m_NodeData, m_CarFacilityData, m_ParkingFacilityData);
 					}
-					if (!isAccess)
+					if (!inScope)
 					{
 						continue;
 					}
@@ -1418,16 +2029,6 @@ namespace AccessAnarchy.Systems
 					{
 						return true;
 					}
-				}
-				return false;
-			}
-
-			private static bool IsNearAnchorLocal(Bezier4x3 bezier, NativeHashMap<int2, FixedList128Bytes<float2>> grid)
-			{
-				if (AccessZoneOverlapSystem.IsNearAnchor(bezier.a, grid) || AccessZoneOverlapSystem.IsNearAnchor(bezier.d, grid)
-					|| AccessZoneOverlapSystem.IsNearAnchor(0.5f * (bezier.a + bezier.d), grid))
-				{
-					return true;
 				}
 				return false;
 			}

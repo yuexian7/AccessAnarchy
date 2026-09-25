@@ -20,3 +20,6 @@ Library/
 
 # 临时 API 输出
 out_api.txt
+
+# 本机草稿与探针脚本（含本机路径、游戏二进制扫描产物）
+.local/

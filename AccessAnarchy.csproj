@@ -30,8 +30,19 @@
 		<Exec Command="$(ModPostProcessorArgs)" EnvironmentVariables="DOTNET_ROLL_FORWARD=Major" LogStandardErrorAsError="true" />
 	</Target>
 
-	<!--ModPublisher.exe 同为 net6.0 目标，同样需要注入。-->
-	<Target Name="RunModPublisher" AfterTargets="Publish">
+	<!--
+	  构建收尾自动清理（作者 2026-10-01：「构建代码的过程如果有日志或临时文件积累的话记得做自动清理」）。
+	  tools\clean-scratch.mjs 只删白名单里的**可再生成**物：Burst 的 bin\Release\net48\Temp、
+	  .local\locale\Locale.zip（官方 Locale.cok 的解压副本）、.local\agent-work\*.before-* 自留备份（每个源文件留最近 2 份）。
+	  绝不碰：产物与部署目录、research\（反编译件）、template\、玩家设置档 *.coc、游戏 Logs\。
+	  放在 DeployWIP 之后：产物已经复制到游戏 Mods 目录，Temp 里不可能还有人要的东西。
+	  ContinueOnError + IgnoreExitCode：本机没有 node 时顶多少清一次草稿，绝不因此把构建判失败。
+	-->
+	<Target Name="CleanAgentScratch" AfterTargets="DeployWIP">
+		<Exec Command="node &quot;$(MSBuildProjectDirectory)\tools\clean-scratch.mjs&quot; --quiet" WorkingDirectory="$(MSBuildProjectDirectory)" ContinueOnError="WarnAndContinue" IgnoreExitCode="true" />
+	</Target>
+
+	<!--ModPublisher.exe 同为 net6.0 目标，同样需要注入。-->	<Target Name="RunModPublisher" AfterTargets="Publish">
 		<Error Condition="!Exists('$(ModPublisherPath)')" Text="Mod publisher not found, please check the path: $(ModPublisherPath)" />
 		<Message Text="Run mod publisher: $(ModPublisherArgs)" Importance="high" />
 		<Exec Command="$(ModPublisherArgs)" EnvironmentVariables="DOTNET_ROLL_FORWARD=Major" LogStandardErrorAsError="true" />

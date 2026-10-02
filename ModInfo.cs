@@ -9,7 +9,7 @@ namespace AccessAnarchy
 	public static class ModInfo
 	{
 		/// <summary>模组版本号（不带 v 前缀，与平台 ModVersion 同格式）。</summary>
-		public const string kVersion = "0.8.0";
+		public const string kVersion = "0.8.5";
 
 		/// <summary>作者署名，按作者本人要求逐字使用。</summary>
 		public const string kAuthor = "yuexian";

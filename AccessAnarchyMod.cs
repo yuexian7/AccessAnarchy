@@ -23,7 +23,7 @@ namespace AccessAnarchy
 
 		public void OnLoad(UpdateSystem updateSystem)
 		{
-			log.Info($"Access Anarchy v{ModInfo.kVersion} loading (access-mode stripping now follows LaneOverlapSystem's own owner gate; options page gains About section; settings + key bindings persistence fixed)...");
+			log.Info($"Access Anarchy v{ModInfo.kVersion} loading (native-crash hardening: own job chain instead of Dependency, world caches reset on preload; scope merged into one switch; performance: anchors collected from vehicle lanes only, access-zone rebuild only when something changed, idle steps leave before touching the barrier; correctness: rebuilt pedestrian lanes re-strip the vehicle lane paired with them, cargo connections back inside the access-zone scope)...");
 			if (GameManager.instance.modManager.TryGetExecutableAsset(this, out var asset))
 			{
 				log.Info($"Current mod asset at {asset.path}");
@@ -41,7 +41,7 @@ namespace AccessAnarchy
 				GameManager.instance.localizationManager.AddSource(locales[i], new LocaleSource(m_Setting, locales[i]));
 			}
 
-			// 注册快捷键（F3=启用/关闭，F4=切换避让范围）。官方路线：
+			// 注册快捷键（出厂默认留空，玩家在「快捷键设置」板块里自己按）。官方路线：
 			// RegisterKeyBindings 把 [SettingsUIKeyboardAction]/[SettingsUIKeyboardBinding]
 			// 声明的动作挂进 InputManager（map = 模组 id），onInteraction 在按下沿触发。
 			//
@@ -60,10 +60,11 @@ namespace AccessAnarchy
 			// 上面的注册顺序保证 [AfterDecode] ApplyKeyBindings 能把玩家键盖回默认键之上）。
 			Colossal.IO.AssetDatabase.AssetDatabase.global.LoadSettings(nameof(AccessAnarchy), m_Setting, new Setting(this));
 
-			// 键位盘上是什么就是什么：空着就空着（作者 2026-09-25 明确要求，不要自动回填 F3/F4）。
+			// 键位盘上是什么就是什么：空着就空着（作者 2026-09-25/28 两次明确：首次订阅就该留空，
+			// 玩家设过按玩家的，SMC+ 那类外部还原优先级最高，任何一环都不要替玩家回填 F3/F4）。
 			// 外部模组（如 SIMPLE MOD CHECKER PLUS）在本函数之后约 3 秒还原它备份的键位/设置时，
 			// 后写的赢——我们这边属性都是实时 getter、热键订阅在 ProxyAction 上，所以天然跟随，不需要额外处理。
-			AccessAnarchyMod.log.Info($"Settings loaded: Enabled={m_Setting.Enabled}, Mode={m_Setting.Mode}, parking={m_Setting.IncludeParkingLots}, buildingAccess={m_Setting.IncludeBuildingAccess}, buildingInternal={m_Setting.IncludeBuildingInternal}, keyEnabled={FormatPath(m_Setting.ToggleEnabledBinding)}, keyScope={FormatPath(m_Setting.ToggleScopeBinding)}");
+			AccessAnarchyMod.log.Info($"Settings loaded: Enabled={m_Setting.Enabled}, Mode={m_Setting.Mode}, keyEnabled={FormatPath(m_Setting.ToggleEnabledBinding)}, keyScope={FormatPath(m_Setting.ToggleScopeBinding)}");
 
 			// 盘上值之外，再把"实际注册进 InputManager 的绑定 + 游戏判定的冲突对侧"打一次。
 			// OnLoad 这次只反映当下（其它模组可能还没注册完），进游戏后 AccessZoneOverlapSystem
@@ -117,12 +118,51 @@ namespace AccessAnarchy
 		public void OnDispose()
 		{
 			log.Info("Access Anarchy OnDispose");
+
+			// 稳定性自查（2026-09-30）：退订热键回调。游戏不会替我们销毁 UpdateAt 注册进去的系统
+			// （Game.UpdateSystem.cs:158 只是 World.GetOrCreateSystemManaged + Register），
+			// 而在模组管理器里"关掉再打开"会让 OnLoad 再跑一遍、对同一个 ProxyAction 再加一次回调 ——
+			// 一次按键触发两次 ToggleEnabled = 开关互相抵消。这里把上一轮的订阅读干净。
 			if (m_Setting != null)
 			{
-				m_Setting.UnregisterInOptionsUI();
+				UnsubscribeHotkey(Setting.kToggleEnabledAction, OnToggleEnabledInteraction);
+				UnsubscribeHotkey(Setting.kToggleScopeAction, OnToggleScopeInteraction);
+				// 卸载安全（v0.8.5）：这一句原来裸着。`UnregisterInOptionsUI` 抛异常时
+				// `m_Setting = null` 与 `Setting.Instance = null` 都被跳过，ModManager 会记一条
+				// "Error disposing mod"——玩家眼里就是"我明明把模组删了，日志里还有 AccessAnarchy 的报错"。
+				// 注销选项页只是顺手清理，失败也不能挡住后面的状态复位。
+				try
+				{
+					m_Setting.UnregisterInOptionsUI();
+				}
+				catch (System.Exception ex)
+				{
+					log.Warn("Unregistering from options UI failed: " + ex);
+				}
 				m_Setting = null;
 			}
 			Setting.Instance = null;
+		}
+
+		/// <summary>取消订阅并关掉动作开关。整个动作都要吞异常：退订只是"顺手清理"，
+		/// 而 OnDispose 抛出会让模组卸载半途失败（`GetAction` 里 `InputManager.instance` 在关机
+		/// 序列里可能已经是 null，见 ModSetting.cs:289-292 它直接解引用）。</summary>
+		private void UnsubscribeHotkey(string actionName, System.Action<ProxyAction, InputActionPhase> handler)
+		{
+			try
+			{
+				ProxyAction action = m_Setting.GetAction(actionName);
+				if (action == null)
+				{
+					return;
+				}
+				action.onInteraction -= handler;
+				action.shouldBeEnabled = false;
+			}
+			catch (System.Exception ex)
+			{
+				log.Warn("Unsubscribing hotkey " + actionName + " failed: " + ex);
+			}
 		}
 	}
 }

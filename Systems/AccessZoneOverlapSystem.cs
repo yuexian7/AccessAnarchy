@@ -68,7 +68,8 @@ namespace AccessAnarchy.Systems
 	///    本系统在 GameSimulation 阶段仍能看到 → 当帧修复，零延迟。稳态匹配 0 实体。
 	///    世界加载后全局模式做一次全量 A（m_OverlapQuery），access 模式由集合就绪触发。
 	/// 3. 邻域集合改为低频整轮重建（v0.8.4 起由 <see cref="ShouldRebuildAccessSets"/> 决定：
-	///    每 kSetRebuildCheckInterval 步看一眼"车道数变了吗 / 原版闸门开过吗"，最长 kSetRebuildFallback 步兜底一次），
+	///    每 kSetRebuildCheckInterval 步看一眼"车道数变了吗 / 原版闸门开过吗"，最长 kSetRebuildFallback
+	///    步兜底一次，且 v0.8.9 起兜底还要求墙钟过 kFallbackMinSeconds=30 秒），
 	///    去掉每帧增量 IsNearAnchor；
 	///    重建日志去掉（原先每轮打一行也是 I/O）。
 	///
@@ -111,7 +112,8 @@ namespace AccessAnarchy.Systems
 	/// （新建连接道）这类"车道被重建"的场合。于是任何一次「owner 被 Updated 而车道没被 Updated」的改写
 	/// ——最典型就是停车场/建筑状态变化、出入口相邻节点被别的编辑牵动——行人条目回来后我们收不到，
 	/// 只能等下一次集合整轮重建（v0.8.4 起由 ShouldRebuildAccessSets 决定：车道数一变、或原版闸门
-	/// 在本周期开过，最迟 kSetRebuildCheckInterval=512 步起一轮；完全没动静时靠 kSetRebuildFallback=8192 步兜底）
+	/// 在本周期开过，最迟 kSetRebuildCheckInterval=512 步起一轮；完全没动静时靠 kSetRebuildFallback=8192 步
+	/// 兜底，v0.8.9 起还要墙钟过 kFallbackMinSeconds=30 秒才算到点）
 	/// 由集合内批量重删捡回来；
 	/// 全局模式更糟：它没有周期性重删，条目一旦回来就永远回来。
 	/// "同一个停车场早先是好的"由此解释——好与不好取决于那一刻离上次整轮重建过了多久。
@@ -140,6 +142,102 @@ namespace AccessAnarchy.Systems
 	///    而普查读的是车道侧，`access=0` 是盲区不是空集；
 	/// ② "邻近锚点"这条 32 米兜底天生跨类——商店/住宅大门与停车场紧贴，锚点半径一盖就把另一类
 	///    的车道一起扫进范围。只要兜底还在，勾选项就不可能真正独立。
+	///
+	/// v0.8.6（玩家评论"it doesn't seem to work for all intersections, even though there is no difference
+	/// in the way it's built" + 作者 2026-10-06「仔细排查是否如此并修复」「（建筑/资产门口的）横道要删也可以的，
+	/// 不要影响道路上的横道就行」）两件事：
+	/// ① **真漏口**：车行连道的判定位漏了 `AllowCargo`。`RouteConnectionType.Cargo` 的连道只打
+	///    `Inside|AllowCargo`（<c>RoadConnectionSystem.cs:1354</c>），而两条模式的"是不是车辆车道"都只认
+	///    Road/Track/Parking 三位（<see cref="IsGlobalLaneByChunk"/> 与 <see cref="IsInNoYieldScope"/> 的全局分支），
+	///    于是货台/装卸口那条连道**两种模式下都不在范围内**——v0.8.5 给出入口分支补的是"没命中这三位就继续
+	///    按 GarageLane/AreaLane/建筑自有车道这些组件判"，而连道是否带车行类型组件取决于共用的连道 prefab，
+	///    判据不该压在一个本机推不出结论的假设上 ⇒ 这一版把 flags 判据补全，并用下面的 `Overlap coverage`
+	///    实机行核对这条连道到底有没有被剥。
+	///    现统一走 <see cref="IsVehicleConnection"/>，并**必须**同时排除 `Pedestrian` 位：
+	///    室外行人连道带的正是 `Pedestrian|AllowMiddle|AllowCargo`（<c>OutsideConnectionSystem.cs:622</c>），
+	///    只认 AllowCargo 会把人行道当车行道删。五种 connection type 共用同一个连道 prefab
+	///    （`m_ConnectionPrefabs[0]`），人车之别只在 flags，所以这条判据没有第二条路可走。
+	/// ② **横道条目按持有者分类**，不再按模式一刀切：出入口模式下只有当**持有者本身是出入口/建筑内部道路**
+	///    （<see cref="IsAccessOrFacilityLane"/>）时才删指向横道的条目，靠"邻域集合/32 米邻近"进范围的那些
+	///    普通市政道路与路口车道一律保留横道条目 ⇒ 资产门口那条横道不再卡车，马路上的横道照常避让。
+	///    `m_IncludeCrosswalks` 这个"按模式取常量"的字段因此删除，四处剥离点（闸门重删 / 首次全量 /
+	///    事件重刷 / 集合批删）与 `AuditAccessSetJob` 全部改调 <see cref="CrosswalkScopeFor"/>，杜绝再各自写死一份。
+	///    ⚠ 这一档"算不算设施"用的是比 <see cref="IsAccessOrFacilityLane"/> **更窄**的
+	///    <see cref="IsFacilityCrosswalkHolder"/>：连道必须带 `Inside`（全库唯一写入点
+	///    `RoadConnectionSystem.cs:1336`），否则图边连接道（`OutsideConnectionSystem.cs:603,611,615`
+	///    的 `Start|Outside|Road`）也算设施，会把市政路口的横道避让一起带走。
+	///    另一个审计 job `AuditPedestrianOverlapsJob` 仍然恒传 includeCrosswalks=1——它数的是
+	///    "原版到底有没有把行人条目写回来"，与我们的删除口径无关，写成按模式判就废了这个基线。
+	///
+	/// 关于"某些交叉口没生效"的定性（作者要的答案）：全局模式下路口车道的行人条目**本来就在删除范围内**，
+	/// 单靠代码推不出"漏了某类路口"的形状，所以这一版把 <see cref="AuditPedestrianOverlapsJob"/> 从 4 个计数
+	/// 扩到 10 个（新增"车辆持有者 / 其中归路网（edge|node）所有"两组），并在心跳里加一行
+	/// `Overlap coverage`。判读：路口车道残留条目=0 却仍然停车 ⇒ 不是 LaneOverlap 这条通道，而是
+	/// 信号灯（<c>CarLaneSpeedIterator.cs:138-149</c> 读 LaneSignalType.Stop）、停车/让行标志位
+	/// （CarLaneFlags.Stop/Yield）、前车Blocking与路口不占用（reservation/CheckOverlapSpace）、
+	/// 行人**本体**站在本车道上（:1105→:1125 的 LaneObject 通道）、以及车辆压到行人道上时被限到 20 km/h
+	/// （:194-196 `math.min(m_PrefabCar.m_MaxSpeed, 5.555556f)`）——这五类都不是"避让行人"的数据，本模组不改。
+	/// ⚠ v0.8.7 更正：这一版实机（作者 57 km 图，2026-10-07 14:46-15:14 日志）证明"条目=0"这个读数本身
+	/// **不可信**——全局模式只在 `m_CoverageDue`（首次全量后第一次心跳）与"闸门开过"时扫全城，而该局
+	/// 闸门全程 0 frame(s)，于是那行 0 只代表切模式后 4 秒的状态；之后 15 分钟里条目回来了也没人再看。
+	/// 真正的漏口与修法见下面 v0.8.7 段。
+	///
+	/// v0.8.7（作者实机两条：①「仅出入口时模组会生效，开启全局后这些设施出入口反倒不生效了」
+	/// ②「有些人行横道确实没生效…附近没有出入口，另外两边的人行横道都生效，就这一边没生效」）：
+	/// **根因是两种模式的重剥节奏不对等，而不对等的源头是"暂停期间本系统根本不跑"**。取证（1.6.0f1）：
+	/// <list type="number">
+	/// <item>原版重建挂在 <c>MainLoop</c> 驱动的链上：<c>SystemOrder.cs:60</c> 把 <c>ModificationSystem</c>
+	/// 注册在 <c>SystemUpdatePhase.MainLoop</c>，它在 OnUpdate 里连跑 Modification1…ModificationEnd
+	/// （<c>Common/ModificationSystem.cs:19-26</c>），<c>LaneOverlapSystem</c> 就在 Modification4B
+	/// （<c>SystemOrder.cs:178</c>）；<c>GameManager.UpdateWorld()</c>（<c>SceneFlow/GameManager.cs:2386-2393</c>，
+	/// 由 <c>Update()</c> 的 <c>:709</c> 调）每**渲染帧**跑一次 MainLoop，只看 <c>shouldUpdateWorld</c>，
+	/// 不看模拟速度。</item>
+	/// <item>本系统挂在 <c>GameSimulation</c>，而 <c>SimulationSystem.OnUpdate</c>
+	/// （反编译件不在 dump 里，本轮 ilspycmd 现读并存为 <c>research/Game.Simulation.SimulationSystem.cs</c>）
+	/// 写的是 <c>if (selectedSpeed == 0f) { num = 0; }</c>（<c>:221-224</c>）…
+	/// <c>if (num != 0) { for (i &lt; num) { frameIndex++; … Update(GameSimulation, …) } }</c>（<c>:274-289</c>）
+	/// ⇒ **暂停（速度 0）时 GameSimulation 一步都不跑，<c>frameIndex</c> 也不涨**。而 <c>ToolSystem</c> 同样在
+	/// MainLoop（<c>SystemOrder.cs:58</c>）：暂停中施工照样给 edge/node/建筑打 <c>Updated</c>，下一渲染帧
+	/// Modification4B 照样整表 Clear+重算，帧末 <c>Cleanup</c>（也在渲染帧循环里，
+	/// <c>GameManager.PostUpdateWorld:2395-2401</c>）把 <c>Updated</c> 摘掉。</item>
+	/// <item>⇒ 这些重建对我们**完全隐形**：闸门 <c>m_RebuildOwnerQuery</c> 只在 GameSimulation 求值。
+	/// 作者这一局日志就是铁证：<c>Rebuild gate: 0 frame(s)</c> 从 14:46:24 到 15:14 一次没变（该值一变就会
+	/// 再打一行），可出入口模式集合内的残留条目却在 0 ↔ 71/80 ↔ 72/82 ↔ 13/13 ↔ 122/195 之间来回跳
+	/// ——条目确实在回来，而探测器一次都没响。</item>
+	/// <item>为什么只有全局模式"反过来不生效"：出入口模式每完成一轮整轮重建，都会在交换点批量重剥整个
+	/// 邻域集合（<see cref="AdvanceAccessSets"/> 返回 true → 干预点 (2)），所以暂停期丢的条目最迟下一轮
+	/// （512 步一查 / 8192 步兜底）就被捡回来；**全局模式只有一次 (1) 全量**（<c>m_InitialGlobalApplyDone</c>
+	/// 只在模式切换/重新启用/读档时复位），之后只剩"闸门重删"和"车道 Updated 重刷"两个事件钩子，而这两个
+	/// 钩子按上一条根本不会响 ⇒ 一次暂停期的重建 = 永久回到原版。作者看到的"出入口生效、全局反倒不生效"
+	/// 与"同一个路口两边生效、某一边不生效"是同一个洞的两种形状：差别不在车道类型，而在**那条车道有没有在
+	/// 最后一次全局剥离之后被原版重算过**。</item>
+	/// </list>
+	/// 修法三条，都不增加稳态开销：
+	/// ① <see cref="DetectBlindWindow"/>：用"渲染帧涨得比模拟步多"量出暂停/0 倍速窗口
+	/// （<c>UnityEngine.Time.frameCount</c> 对 <c>SimulationSystem.frameIndex</c>，余量
+	/// <see cref="kBlindFrameMargin"/> 帧），命中就把 <c>m_GateSeenSinceRebuild</c> 与
+	/// <c>m_GlobalSweepSignal</c> 一起置位——出入口模式据此立刻起一轮，全局模式据此起一次重剥。
+	/// ② <see cref="ShouldSweepGlobal"/>：全局模式补上与出入口模式同一套调度（信号优先、512 步看一眼
+	/// 候选数变没变、8192 步兜底），跑的是同一个 <see cref="StripPedestrianOverlapsJob"/> 全城批删；
+	/// 稳态一张没动过的图只有兜底那一次，而且它只读不写（没有行人条目的车道在计数为 0 时直接返回）。
+	/// ⚠ **v0.8.9 修正上一条**：作者实机日志（2026-10-07 17:02–17:03，全局模式）里 `Global sweep driver`
+	/// 的 sweep 数从 3 涨到 5、间隔只有 8~19 秒，每次还替换 153 条车道的缓冲区
+	/// （`re-stripped 153 SetBuffer write(s) / 193 pedestrian entries`），而覆盖读数一直是
+	/// `0 of 6745` / `0 of 6739` 之间跳——城市结构没变，判据却把"±几条"和"新铺一条路"同等看待。
+	/// 当时我把这个频次归给候选数抖动，**同一天的 v0.8.9 日志否证了归因**：那局
+	/// `overlap entities 6751 -> 6751`（Δ 全程 0）、34 个检查点全部 skipped，两次 sweep 之间正好是
+	/// 8192 步 ≈ 36 秒 ⇒ 起 sweep 的是兜底，而兜底只用步数量计量，在步率高的那局会被压到 8~19 秒
+	/// （见 <see cref="kFallbackMinSeconds"/>）。两条都改：门槛挡住噪声（证据就是这局 34 次 skipped），
+	/// 墙钟下限挡住兜底被加速；基线同时改成每个检查点前移，比的是"这一段的变化量"而不是
+	/// "与上一次起轮的总量之差"。出入口模式的锚点数判据保持原样，
+	/// 所以新建筑的出入口仍然当检查点就生效，没有牺牲 v0.8.5/v0.8.6 的响应性。
+	/// ③ 度量补口：全局覆盖率改成**每次重剥之后都扫**（<c>m_CoverageDue</c> 由 (1) 与 sweep 共同置位），
+	/// 新增一行 `Global sweep driver` 自证（跑了几次、探测到几次暂停窗口、这一阵子又剥掉几条），并让全城
+	/// 审计在真数到残留条目时顺带采 3 条样本（持有者类型位 + 对端 flags + 曲线中点坐标，槽位见
+	/// <see cref="kAuditSampleCount"/> 与 <see cref="kAuditSamplePerChunk"/>）——下次再报"某一边不生效"，
+	/// 日志能直接说出是哪条车道、指向哪种
+	/// 对端，不再靠肉眼猜。⚠ 样本里的"持有者类型位"同时能回答 v0.8.6 那个本机推不出的问题：连道到底
+	/// 带不带车行类型组件。
 	///
 	/// v0.8.4（玩家反馈"游戏变卡/模拟速度变慢"，并贴出 `Anchor grid capacity hit: 233500 dropped`
 	/// 在一局里出现 2157 次）：核查确认**处理机制有实质问题**，不是错觉，作者本地"帧数没怎么变"也对得上——
@@ -173,7 +271,8 @@ namespace AccessAnarchy.Systems
 	/// 全局 = 所有道路 + 人行横道；出入口 = 所有类型出入口/停车道 + 邻域集合 + 邻近锚点，
 	/// 三条判据收敛到 <see cref="IsAccessOrFacilityLane"/> 与 <see cref="IsInNoYieldScope"/> 一处。
 	/// 网格值回到 `float2`（无类别位）⇒ 每格容量从 10 涨回 14。
-	/// 横道仍然只在全局分支参与（`m_IncludeCrosswalks = globalMode ? 1 : 0`），出入口模式一条不动。
+	/// 横道仍然只在全局分支参与（当时是 `m_IncludeCrosswalks = globalMode ? 1 : 0`，出入口模式一条不动；
+	/// v0.8.6 起这个字段没了，改由 CrosswalkScopeFor 按持有者判，见上方 v0.8.6 ②）。
 	///
 	/// v0.8.2 第三轮（作者实测「全部道路切回仅出入口后，人行横道再也不避让行人，只能关总开关才好」）：
 	/// **模式从全局切回出入口** 那一支曾写成恒假条件（`m_LastMode == kModeGlobal && !toAccessMode`：
@@ -232,8 +331,72 @@ namespace AccessAnarchy.Systems
 		/// 稳态城市里连续 15 个心跳周期 「Rebuild gate: 0 frame(s)」 —— 原版一次都没重算过 overlap，
 		/// 那一轮"全城 12.8 万条候选 × 5 采样 × 9 邻格 + 55 万次锚点插入"全是白做的，
 		/// 玩家反馈的模拟速度变慢就来自这里。现在只在**有变化信号**（车道数变了 / 原版重建闸门开过 /
-		/// 模式或范围切换）时重建，剩下的用这个长兜底保证极端漏检也能自愈。</summary>
+		/// 模式或范围切换）时重建，剩下的用这个长兜底保证极端漏检也能自愈。⚠ 兜底另有墙钟下限
+		/// <see cref="kFallbackMinSeconds"/>：步数量在高速档会被同比压缩，光靠步数定不出"最长多少秒一次"。</summary>
 		private const int kSetRebuildFallback = 8192;
+
+		/// <summary>v0.8.9：全局模式"车道数变了就重剥"的**物质性门槛**（绝对条数）。
+		/// 出处是作者实机日志（2026-10-07 17:02–17:03，v0.8.7，全局模式）里 `Global sweep driver`
+		/// 的 sweep 数从 3 涨到 5、间隔只有 8~19 秒，而覆盖读数一直是
+		/// `vehicle lanes 0 of 6745 hold 0` / `0 of 6739 hold 0`——城市结构没变、计数在来回抖几条，
+		/// 判据却把"±几条"和"新铺了一条路"同等看待。⚠ 那条日志后来被 v0.8.9 的一局否证了**归因**：
+		/// 这局 `overlap entities 6751 -> 6751`（Δ 全程 0）、34 个检查点全跳过，8~19 秒那个频次
+		/// 对得上的是 <see cref="kSetRebuildFallback"/> 步兜底（见 <see cref="kFallbackMinSeconds"/>）。
+		/// 门槛本身仍然要加：它把"计数噪声"这条路径关掉的证据是这局的 34 次 skipped，
+		/// 而真正的新路/新建筑（动辄上千条车道）照常立刻触发；小变化交给兜底。</summary>
+		private const int kSweepCountMinDelta = 256;
+
+		/// <summary>v0.8.9：同上门槛的相对部分（百分比）。大城市里 2% 就是几千条，小城市里靠绝对值 256 兜住，
+		/// 两个条件任一满足即视为"城市结构变了"。</summary>
+		private const int kSweepCountMinPercent = 2;
+
+		/// <summary>v0.8.9：出入口模式里"候选数变了就起一轮"的同类门槛（绝对条数 / 百分比）。
+		/// 阈值比全局模式低一档，因为出入口的一轮是摊到 ~63 步里跑的、单轮成本低，
+		/// 而锚点数那条判据仍然原样保留（新建筑必然改锚点，不受这里影响）。</summary>
+		private const int kRebuildCandidateMinDelta = 64;
+
+		/// <summary>v0.8.9：<see cref="kRebuildCandidateMinDelta"/> 的相对部分。</summary>
+		private const int kRebuildCandidateMinPercent = 1;
+
+		/// <summary>v0.8.9：最长兜底**另外**要求的墙钟秒数（步数与墙钟两个条件都到才算到点）。
+		/// 兜底原本只用步数量，而"一步"值多少秒随玩家的模拟速度档和帧率变，所以"最长兜底周期"
+		/// 在墙上并不是一个固定的量：
+		/// ① 作者实机 2026-10-07 23:02–23:19（v0.8.9，全局模式）日志里每 1800 步 ≈ 7.8~8.0 秒
+		///   ⇒ ≈225~230 步/秒 ⇒ 8192 步 ≈ 36 秒，两次全城重剥之间正是这个长度（23:04:19 首剥、
+		///   兜底二剥落在 pass ≈8193，23:05:18 那次心跳报出 sweep=2），而同一段里
+		///   `overlap entities 6751 -> 6751`（Δ=0）、34 个检查点全被跳过 ⇒ **起 sweep 的是兜底，
+		///   不是候选数门槛**（我上一轮把 8~19 秒的频次归给"候选数抖动"是错的，这份日志把它否掉了）；
+		/// ② 上一局 17:02–17:03（v0.8.7）实测的 sweep 间隔是 8~19 秒，但那版两条触发路径都没有门槛、
+		///   日志也已被后续会话覆盖，**无法归因到兜底**；能确定的是：只用步数量时，这个"最长周期"
+		///   在墙上的长度完全由步率决定，玩家开高速档就会被同比压缩。
+		/// 30 秒夹在中间：①那局的 36 秒照常放行，步率再高也不会把全城重剥压到半分钟以内。
+		/// 只夹兜底这一条；闸门、暂停窗口（`m_GlobalSweepSignal`）、锚点持续变化、候选数变够量
+		/// 这四条事件路径都不受它影响。</summary>
+		private const float kFallbackMinSeconds = 30f;
+
+		/// <summary>v0.8.7：判定"有一段渲染帧本系统根本没跑"的余量（帧）。
+		/// 判据量的是**相邻两次我们自己的步进之间**的差值（时间戳每步都复位），所以它等于
+		/// "连续多少渲染帧没有产出任何模拟步"。正常推进时这个数是 0 或 1；能连续 8 帧以上不产步的只有：
+		/// ①暂停 / 0 倍速（<c>SimulationSystem.cs:221-224</c> 直接把步数置 0）；
+		/// ②寻路积压把 <c>num</c> 夹到 0（同文件 <c>:240-243</c> <c>pendingSimulationFrame</c>，
+		/// 以及 <c>:246-252</c> 的 FrameRate 偏好夹，最后 <c>:256</c> 的下界是 0 而不是 1）。
+		/// ②看着像误报，其实不是：这些帧里 <c>MainLoop</c> 照样在跑、原版照样可能重算 overlap，
+		/// 而我们同样一步都没看见 ⇒ 补剥是应该做的。真正要防的是"每帧都扫全城"，那由
+		/// <see cref="kGateRebuildMinGap"/> 与"信号在起轮时清零"两层夹住（见 <see cref="ShouldSweepGlobal"/>）。
+		/// 取 8 帧（约 0.13 秒）而不是 1 帧，是为了不让高刷屏上的常态 0 步帧把扫描频率顶满。</summary>
+		private const int kBlindFrameMargin = 8;
+
+		/// <summary>v0.8.7：全城审计发现"该剥却没剥干净"的车辆车道时，最多打几条样本进日志。
+		/// 采样本身是**每个 chunk 一格**（见 <see cref="kAuditSamplePerChunk"/>），主线程按顺序取前
+		/// <see cref="kAuditSampleCount"/> 个非空槽——不用原子计数器抢槽，因为抢不到就会写出
+		/// "A 车道的持有者配 B 车道的对端"这种混样，而这行是要给作者当坐标飞过去看的。</summary>
+		private const int kAuditSampleCount = 3;
+
+		/// <summary>每个 chunk 的样本槽宽度（int）：残留行人条目数（0 = 本 chunk 没有样本）、
+		/// 持有者 index/version、对端 index/version、持有者类型位、对端
+		/// <c>PedestrianLane.m_Flags</c>、对端 <c>ConnectionLane.m_Flags</c>、持有者曲线中点 x/z（米，取整）。
+		/// 数组长度 = chunk 数 × 本值，与 <see cref="kAuditCountersPerChunk"/> 同量级（TempJob，扫完即释）。</summary>
+		private const int kAuditSamplePerChunk = 10;
 
 		/// <summary>同一网格单元内两个锚点靠得比这根距离还近就视为重复，只留第一个。
 		/// 停车场/坡道的曲线采样点非常密（实机：每格平均 16 个采样点、闸门 14 个），
@@ -271,10 +434,29 @@ namespace AccessAnarchy.Systems
 		private const int kAuditIdle = 0;
 		private const int kAuditWaitFrames = 1;
 
-		/// <summary>审计计数每块占几个 int：车辆车道数、行人条目数、横道车道数、横道条目数。</summary>
-		private const int kAuditCountersPerChunk = 4;
+		/// <summary>审计计数每块占几个 int（v0.8.6 从 4 扩到 10，槽位含义见 kAuditSlot* 常量）。
+		/// 前两格是"全城任何持有者"的口径，与 v0.7.8 起的基线/恢复判据完全兼容；
+		/// 4~9 号是这一版为「交叉口到底有没有被剥干净」新增的**按持有者分类**口径：
+		/// 车辆持有者（我们该管的）与其中归路网的（edge/node 所有的市政道路与路口车道）各数一遍，
+		/// 连"扫到了多少条这样的车道"一起存，不然光看残留数没法判分母。
+		/// 每块写满 10 个 int 而不是用原子计数，避免 chunk 间争用（主线程求和）。</summary>
+		private const int kAuditCountersPerChunk = 10;
 
-		/// <summary>重删计数的**初始** chunk 槽位数（每块两格：该 chunk「修好的车道数」「删掉的行人条目数」）。
+		private const int kAuditLanes = 0;
+		private const int kAuditEntries = 1;
+		private const int kAuditCrosswalkLanes = 2;
+		private const int kAuditCrosswalkEntries = 3;
+		private const int kAuditVehicleLanes = 4;
+		private const int kAuditVehicleEntries = 5;
+		private const int kAuditRoadLanes = 6;
+		private const int kAuditRoadEntries = 7;
+		private const int kAuditVehicleScanned = 8;
+		private const int kAuditRoadScanned = 9;
+
+		/// <summary>重删计数的**初始** chunk 槽位数（每块两格：该 chunk 的「SetBuffer 写入次数」
+		/// 「删掉的行人条目数」。v0.8.6 复核：同一条车道可能被"反向一跳"和它自己的 owner 两路各取到一次，
+		/// 所以第一格是**写入次数**而不是不同车道数——日志文案已照此改写；两次写入内容取自同一份只读快照，
+		/// 幂等，不影响正确性）。
 		/// 槽位是 `unfilteredChunkIndex * 2` 精确独占的（见 <see cref="EnsureRepairCapacity"/> 与
 		/// StripRebuiltLanesJob.m_RepairCounters 上的 [NativeDisableParallelForRestriction]），
 		/// 不像早期版本按 &amp; 63 取模撞槽，所以计数是准确值而不是下界；
@@ -320,9 +502,9 @@ namespace AccessAnarchy.Systems
 		/// 纯行人连道**只有** Inside|Pedestrian，车行/轨道/停车行才有下面这三位之一，
 		/// 所以这三位是"这条连道确定是车走的"的官方判据（原版自己也是这么判的，
 		/// VehicleUtils.cs:491-503）。全局分支从 v0.5 起就在用同一组位，出入口分支以前没用过。
-		/// ⚠ 但它**不是**"不是出入口"的判据：`RouteConnectionType.Cargo` 的连道只有
-		/// Inside|AllowCargo（:1354），所以命中这三位=立即是出入口，没命中只=继续按组件判
-		/// （见 IsAccessOrFacilityLane 的 v0.8.5 修正）。</summary>
+		/// ⚠ 它既**不是**"不是出入口"的判据，也不是"不是车行道"的判据：
+		/// `RouteConnectionType.Cargo` 的连道只有 Inside|AllowCargo（:1354），三位一个都不带，
+		/// 判"是不是车走的"请一律用 <see cref="IsVehicleConnection"/>，不要就地比较这三位。</summary>
 		private const ConnectionLaneFlags kVehicleConnectionFlags = ConnectionLaneFlags.Road | ConnectionLaneFlags.Track | ConnectionLaneFlags.Parking;
 
 		/// <summary>每个网格单元最多存几条锚点——这是**我们设的闸门**（放第 15 条之前就停手并计入
@@ -470,18 +652,73 @@ namespace AccessAnarchy.Systems
 		private int m_LastAuditLanes = -1;
 		private int m_LastAuditEntries = -1;
 
+		/// <summary>v0.8.6 的 Overlap coverage 行：整行文本去重（这行一次要印六个数字，
+		/// 逐个数存"上一次的值"要开六个字段，不如直接把上次那行存下来比一次）。
+		/// 只有真的跑了全城扫描时才会构造这行，稳态每 ~30 秒最多一次，成本可忽略。</summary>
+		private string m_LastCoverageLine;
+
+		/// <summary>v0.8.6：首次全量剥离跑完后，欠读者一次全城覆盖率读数（下次心跳补）。
+		/// 之后只有"原版改写过 overlap"才再扫，见 ReportRebuildDiagnostics。</summary>
+		private bool m_CoverageDue;
+
 		/// <summary>上一轮整轮重建开始时看到的两批实体数，以及"之后原版重建闸门有没有开过"。
 		/// 这是 v0.8.4 的变化探测器：施工/拆建必然改动带 LaneOverlap 的车道数或带曲线的出入口车道数，
 		/// 而任何一次原版重算 overlap 都会被 m_RebuildOwnerQuery 抓到。</summary>
 		private int m_LastAnchorCount = -1;
+
+		/// <summary>v0.8.9：上一个检查点看到的锚点数（-1 = 无待确认的变化）。锚点数被车位/临时车道
+		/// 来回抖动时，这个值让"起轮"必须等同一个新数字连续出现两次（见 <see cref="ShouldRebuildAccessSets"/>）。</summary>
+		private int m_AnchorSeenPrev = -1;
 		private int m_LastCandidateCount = -1;
 		private bool m_GateSeenSinceRebuild;
 		private uint m_LastRebuildFrame;
+
+		/// <summary>v0.8.7 暂停/0 倍速探测器用的两个时间戳：上一次 OnUpdate 看到的模拟步号与渲染帧号。
+		/// 判据与理由见 <see cref="DetectBlindWindow"/>；<c>m_LastStepRenderFrame &lt; 0</c> = 本局还没跑过。</summary>
+		private uint m_LastStepFrameIndex;
+		private int m_LastStepRenderFrame = -1;
+
+		/// <summary>本局探测到的"我们没跑而原版可能在改"窗口次数（只用于心跳自证）。</summary>
+		private int m_BlindWindows;
+
+		/// <summary>v0.8.7：全局模式的重剥信号——暂停窗口（或候选数变化之外的其它成因）攒下来了，
+		/// 下一次 <see cref="ShouldSweepGlobal"/> 就直接放行。起一轮重剥后清零。</summary>
+		private bool m_GlobalSweepSignal;
+
+		private uint m_LastSweepFrame;
+
+		/// <summary>v0.8.9：与 <see cref="m_LastSweepFrame"/>/<see cref="m_LastRebuildFrame"/> 配对的**墙钟**基准，
+		/// 用于 <see cref="kFallbackMinSeconds"/>（与 m_LastRebuildTime 同一条理由：步数量在高速档会被压缩）。</summary>
+		private float m_LastSweepTime;
+		private float m_LastRebuildTime;
+		private int m_LastSweepCandidates = -1;
+
+		/// <summary>v0.8.9：最近两次 512 步检查点数到的"带 LaneOverlap 的实体数"，只为把门槛读数打进日志。</summary>
+		private int m_SweepCountPrev = -1;
+		private int m_SweepCountNow = -1;
+		private int m_GlobalSweeps;
+		private int m_GlobalSweepSkips;
+
+		/// <summary>全局重剥的诊断计数（每 chunk 两格：SetBuffer 写入次数、删掉的行人条目数），
+		/// 与 <see cref="m_RepairCounters"/> 同构但必须分开：闸门重删与全城重剥在同一步里都会排，
+		/// 共用数组会把两个成因糊成同一个数（v0.8.6 那条"混合了行人持有者所以证明不了任何事"的教训）。
+		/// 只有 (1)/sweep 那一批拿得到它，事件重刷那一批传的是未创建的默认值。</summary>
+		private NativeArray<int> m_SweepCounters;
+		private int m_SweepCounterChunks;
+
+		private int m_LastLoggedSweeps = -1;
+		private int m_LastLoggedBlindWindows = -1;
+		private int m_LastLoggedSweepWrites = -1;
+		private int m_LastLoggedSweepEntries = -1;
 
 		/// <summary>整轮重建的实际发生次数与被"没变化"挡掉的检查次数（只用于心跳自证）。
 		/// 稳态城市里应当看到 rounds 不再增长、skipped 持续增长——这就是 v0.8.4 那条修复的证据。</summary>
 		private int m_RebuildRounds;
 		private int m_RebuildSkips;
+
+		/// <summary>v0.8.9：上一次出入口审计看到过的轮次号。审计现在只在"有新情况"时跑
+		/// （见 <see cref="ReportRebuildDiagnostics"/>），刚起完一轮也必须读一次，否则那轮的成效没有读数。</summary>
+		private int m_LastAuditedRounds = -1;
 		private int m_LastLoggedRounds = -1;
 		private int m_LastLoggedSkips = -1;
 
@@ -561,6 +798,8 @@ namespace AccessAnarchy.Systems
 			m_Cursor = -1;
 			m_RepairCounterChunks = kRepairSlots;
 			m_RepairCounters = new NativeArray<int>(m_RepairCounterChunks * 2, Allocator.Persistent, NativeArrayOptions.ClearMemory);
+			m_SweepCounterChunks = kRepairSlots;
+			m_SweepCounters = new NativeArray<int>(m_SweepCounterChunks * 2, Allocator.Persistent, NativeArrayOptions.ClearMemory);
 			m_GridStats = new NativeArray<int>(kGridStatsSlots, Allocator.Persistent, NativeArrayOptions.ClearMemory);
 			m_OverlapQuery = GetEntityQuery(new EntityQueryDesc
 			{
@@ -699,6 +938,10 @@ namespace AccessAnarchy.Systems
 			{
 				m_RepairCounters.Dispose();
 			}
+			if (m_SweepCounters.IsCreated)
+			{
+				m_SweepCounters.Dispose();
+			}
 			if (m_GridStats.IsCreated)
 			{
 				m_GridStats.Dispose();
@@ -750,6 +993,13 @@ namespace AccessAnarchy.Systems
 					m_RepairCounters[i] = 0;
 				}
 			}
+			if (m_SweepCounters.IsCreated)
+			{
+				for (int i = 0; i < m_SweepCounters.Length; i++)
+				{
+					m_SweepCounters[i] = 0;
+				}
+			}
 			if (m_GridStats.IsCreated)
 			{
 				for (int i = 0; i < m_GridStats.Length; i++)
@@ -787,14 +1037,37 @@ namespace AccessAnarchy.Systems
 			m_LastAuditSet = -1;
 			m_LastAuditLanes = -1;
 			m_LastAuditEntries = -1;
+			m_LastCoverageLine = null;
+			m_CoverageDue = false;
 			m_LastAnchorCount = -1;
+			m_AnchorSeenPrev = -1;
 			m_LastCandidateCount = -1;
 			m_GateSeenSinceRebuild = false;
 			m_LastRebuildFrame = 0;
+			m_LastRebuildTime = 0f;
 			m_RebuildRounds = 0;
 			m_RebuildSkips = 0;
+			m_LastAuditedRounds = -1;
 			m_LastLoggedRounds = -1;
 			m_LastLoggedSkips = -1;
+			// v0.8.7：全局重剥与暂停窗口探测器。探测器的一次性基准（m_LastStepRenderFrame = -1）
+			// 必须一起复位，否则换图后的第一步会把"上一张图到最后一次步进之间"的渲染帧差
+			// 读成一个假的暂停窗口。计数复位到 -1 是为了让新图至少各写一行自证。
+			m_LastStepFrameIndex = 0;
+			m_LastStepRenderFrame = -1;
+			m_BlindWindows = 0;
+			m_GlobalSweepSignal = false;
+			m_LastSweepFrame = 0;
+			m_LastSweepTime = 0f;
+			m_LastSweepCandidates = -1;
+			m_GlobalSweeps = 0;
+			m_GlobalSweepSkips = 0;
+			m_SweepCountPrev = -1;
+			m_SweepCountNow = -1;
+			m_LastLoggedSweeps = -1;
+			m_LastLoggedBlindWindows = -1;
+			m_LastLoggedSweepWrites = -1;
+			m_LastLoggedSweepEntries = -1;
 		}
 
 		protected override void OnUpdate()
@@ -809,6 +1082,10 @@ namespace AccessAnarchy.Systems
 			}
 			Setting setting = Setting.Instance;
 			bool enabled = setting != null && setting.Enabled;
+			// v0.8.7：先量"这一段渲染帧里我们到底跑没跑"，再决定这一帧有没有活。
+			// 放在 enabled 判断之前，是为了让时间戳在关闭态也跟着走——否则关掉模组再打开，
+			// 关闭期间攒下的渲染帧差会被读成一个假的暂停窗口。
+			DetectBlindWindow();
 			if (!enabled)
 			{
 				// 启用→关闭跳变：我们此前用 ECB.SetBuffer 删掉的 LaneOverlap 条目不会自动还原
@@ -834,6 +1111,9 @@ namespace AccessAnarchy.Systems
 					m_ReapplyCountdown = 0;
 					m_ScopeObserved = false;
 					m_SetsStale = true;
+					// 关闭态不需要补剥（恢复沿会把条目全部还给原版），把信号一起丢掉，
+					// 免得"重新启用"的第一步就因为关闭期间的渲染帧差去扫全城。
+					m_GlobalSweepSignal = false;
 				}
 				// 审计只在关闭态推进：启用态下我们本来就在删，测出的 0 会误判成"没恢复"，
 				// 进而白跑一次全城 owner+lane Updated（v0.7.2 时代那种 churn）。
@@ -868,12 +1148,12 @@ namespace AccessAnarchy.Systems
 			// 启用后第一遍此刻还没删过任何条目（本帧的删除要到帧末 ECB 回放才生效），
 			// 扫一次当作"这个存档原版的行人条目数"基线：关闭后判恢复不再靠">0"这种
 			// 会被横道条目糊弄过去的弱判据（v0.7.8）。系统实例随世界重建，基线只测一次。
-			if (!m_BaselineTaken && ScanPedestrianOverlaps(out _, out int baselineEntries, out _, out int baselineCrosswalk))
+			if (!m_BaselineTaken && ScanPedestrianOverlaps(out AuditTotals baseline, out _, collectSamples: false))
 			{
-				m_BaselineEntries = baselineEntries;
-				m_BaselineCrosswalk = baselineCrosswalk;
+				m_BaselineEntries = baseline.m_Entries;
+				m_BaselineCrosswalk = baseline.m_CrosswalkEntries;
 				m_BaselineTaken = true;
-				AccessAnarchyMod.log.Info($"Baseline pedestrian overlaps: {baselineEntries} entries ({baselineCrosswalk} crosswalk).");
+				AccessAnarchyMod.log.Info($"Baseline pedestrian overlaps: {baseline.m_Entries} entries ({baseline.m_CrosswalkEntries} crosswalk) on {baseline.m_Lanes} lane(s); vehicle holders {baseline.m_VehicleScanned} ({baseline.m_RoadScanned} street/intersection).");
 			}
 
 			// 锚点网格 + 邻域集合：低频整轮重建。不再每帧增量扫全城做 IsNearAnchor。
@@ -918,13 +1198,20 @@ namespace AccessAnarchy.Systems
 			//    重刷 job、再把自己注册成 barrier 生产者。单次几微秒，但乘上每渲染帧 1–8 个模拟步
 			//    就是长期白付；先判"这一步到底有没有活"，没活直接返回。
 			// ③ 判活所需的三个查询空判断都用 IsEmptyIgnoreFilter（按 archetype 计数），成本可忽略。
+			//
+			// v0.8.7 把这一段从"全局模式只有一次全量"改成"两种模式都有条件重剥"：
+			// 原来 `globalFirstPass` 是全局模式唯一的批量剥离机会（m_InitialGlobalApplyDone 只在模式
+			// 切换/重新启用/读档时复位），之后只剩闸门与车道 Updated 两个事件钩子——而这两个钩子在
+			// 暂停期间根本不响（见类注释 v0.8.7）。现在多一个 globalSweep，判据与出入口模式的
+			// ShouldRebuildAccessSets 同一套（信号优先 / 512 步看候选数 / 8192 步兜底）。
 			bool needAccessSets = !globalMode;
 			bool gateActive = !m_RebuildOwnerQuery.IsEmptyIgnoreFilter;
 			bool refreshActive = !m_RefreshQuery.IsEmptyIgnoreFilter;
 			bool globalFirstPass = globalMode && !m_InitialGlobalApplyDone;
+			bool globalSweep = globalMode && !globalFirstPass && ShouldSweepGlobal(frameIndex);
 			bool gateUrgent = m_GateSeenSinceRebuild && frameIndex - m_LastRebuildFrame >= (uint)kGateRebuildMinGap;
 			bool roundDue = needAccessSets && (m_BuildInProgress || !m_SetsInitialized || gateUrgent || ShouldRebuildAccessSets(frameIndex));
-			if (!roundDue && !gateActive && !refreshActive && !globalFirstPass)
+			if (!roundDue && !gateActive && !refreshActive && !globalFirstPass && !globalSweep)
 			{
 				return;
 			}
@@ -946,9 +1233,11 @@ namespace AccessAnarchy.Systems
 					// 起新一轮（旧活跃集在重建期间仍可继续用）。
 					m_Cursor = -1;
 					m_LastAnchorCount = m_AnchorQuery.CalculateEntityCount();
+					m_AnchorSeenPrev = -1;
 					m_LastCandidateCount = m_OverlapQuery.CalculateEntityCount();
 					m_GateSeenSinceRebuild = false;
 					m_LastRebuildFrame = frameIndex;
+					m_LastRebuildTime = UnityEngine.Time.realtimeSinceStartup;
 					m_RebuildRounds++;
 				}
 				setsJustReady = AdvanceAccessSets(setting, frameIndex);
@@ -1005,7 +1294,6 @@ namespace AccessAnarchy.Systems
 					m_Grid = m_AnchorGrid,
 					m_AccessVehicleSet = globalMode ? default : m_VehicleSets[m_ActiveSetIndex],
 					m_Mode = setting.Mode,
-					m_IncludeCrosswalks = globalMode ? 1 : 0,
 					m_Ecb = ecb,
 					m_RepairCounters = m_RepairCounters
 				};
@@ -1013,9 +1301,16 @@ namespace AccessAnarchy.Systems
 				scheduled = true;
 			}
 
-			// (1) 全局模式首次全量
-			if (globalMode && !m_InitialGlobalApplyDone)
+			// (1) 全局模式全量剥离：世界加载/切模式后的首次全量 + v0.8.7 起的条件重剥（sweep）。
+			// 这是全局模式唯一的"批量"路径，v0.8.6 及以前它一辈子只跑一次，所以任何一次
+			// 原版重算（尤其暂停期间发生的、我们探测器看不见的那些）都会把结果永久留在原版状态。
+			// 现在与出入口模式共用同一套节流：信号（暂停窗口）优先、512 步看候选数变化、8192 步兜底。
+			// 成本：稳态一张没动过的图只有兜底那一次；扫描本身只读，没有行人条目的车道在
+			// HasPedestrianOverlap 处直接返回，不产生任何 ECB 写入（与 (0) 同一个不退回写战的论证）。
+			if (globalMode && (globalFirstPass || globalSweep))
 			{
+				// 计数数组按 chunk 独占槽位；扩容点内部会先 WaitForJobs()（见 EnsureSweepCapacity）。
+				EnsureSweepCapacity(m_OverlapQuery.CalculateChunkCountWithoutFiltering());
 				StripPedestrianOverlapsJob overlapJob = new StripPedestrianOverlapsJob
 				{
 					m_EntityType = GetEntityTypeHandle(),
@@ -1038,12 +1333,25 @@ namespace AccessAnarchy.Systems
 					m_Grid = m_AnchorGrid,
 					m_AccessVehicleSet = default,
 					m_Mode = setting.Mode,
-					m_IncludeCrosswalks = 1,
+					m_StripCounters = m_SweepCounters,
 					m_Ecb = ecb
 				};
 				overlapJob.m_SortKeyBase = kSortKeyInitialPass;
 				m_JobChain = overlapJob.ScheduleParallel(m_OverlapQuery, m_JobChain);
 				m_InitialGlobalApplyDone = true;
+				// 本批删除要到帧末 ECB 回放才落地，所以读数不在这里排，留给下一次心跳
+				// （心跳间隔 1800 步，远大于"回放完成"所需的 1 帧）。
+				m_CoverageDue = true;
+				// v0.8.7：这一轮重剥的账从这里起算（与出入口模式在"起轮"处记时间戳/候选数是同一套做法：
+				// 间隔量在**轮次发生**上，不是量在轮次结束上——这里一轮就是一次 job，没有跨步过程）。
+				m_GlobalSweeps++;
+				m_LastSweepFrame = frameIndex;
+				m_LastSweepTime = UnityEngine.Time.realtimeSinceStartup;
+				m_LastSweepCandidates = m_OverlapQuery.CalculateEntityCount();
+				m_GlobalSweepSignal = false;
+				// v0.8.9：闸门标记在这里消费掉（全局模式没有"起轮"这个概念，不清就永远卡着
+				// ShouldSweepGlobal 的那条让路判据）。出入口模式在起轮处清的是同一个标记。
+				m_GateSeenSinceRebuild = false;
 				scheduled = true;
 			}
 
@@ -1056,6 +1364,14 @@ namespace AccessAnarchy.Systems
 					m_Overlaps = GetBufferLookup<LaneOverlap>(isReadOnly: true),
 					m_PedestrianLaneData = GetComponentLookup<PedestrianLane>(isReadOnly: true),
 					m_ConnectionLaneData = GetComponentLookup<ConnectionLane>(isReadOnly: true),
+					m_GarageLaneData = GetComponentLookup<GarageLane>(isReadOnly: true),
+					m_AreaLaneData = GetComponentLookup<AreaLane>(isReadOnly: true),
+					m_CarLaneData = GetComponentLookup<CarLane>(isReadOnly: true),
+					m_ParkingLaneData = GetComponentLookup<ParkingLane>(isReadOnly: true),
+					m_OwnerData = GetComponentLookup<Owner>(isReadOnly: true),
+					m_EdgeData = GetComponentLookup<Edge>(isReadOnly: true),
+					m_NodeData = GetComponentLookup<Node>(isReadOnly: true),
+					m_Mode = setting.Mode,
 					m_Ecb = ecb
 				};
 				accessJob.m_SortKeyBase = kSortKeyFromSet;
@@ -1092,7 +1408,6 @@ namespace AccessAnarchy.Systems
 					m_Grid = m_AnchorGrid,
 					m_AccessVehicleSet = globalMode ? default : m_VehicleSets[m_ActiveSetIndex],
 					m_Mode = setting.Mode,
-					m_IncludeCrosswalks = globalMode ? 1 : 0,
 					m_Ecb = ecb
 				};
 				refreshJob.m_SortKeyBase = kSortKeyRefresh;
@@ -1104,6 +1419,128 @@ namespace AccessAnarchy.Systems
 			{
 				m_EndFrameBarrier.AddJobHandleForProducer(m_JobChain);
 			}
+		}
+
+		/// <summary>v0.8.7：量出"这一段渲染帧里本系统一次都没跑"的窗口，并把两种模式的重剥信号一起点上。
+		///
+		/// 为什么需要它（作者实机两条反馈的根因，取证见类注释 v0.8.7 段）：原版
+		/// <c>LaneOverlapSystem</c> 在 <c>MainLoop → ModificationSystem → Modification4B</c>
+		/// （<c>SystemOrder.cs:58</c> + <c>:178</c>），每**渲染帧**跑一次；本系统在
+		/// <c>GameSimulation</c>，而 <c>SimulationSystem.OnUpdate</c> 在 <c>selectedSpeed == 0f</c> 时
+		/// 把步数 <c>num</c> 直接置 0、整段跳过 ⇒ **暂停期间原版照样重建 overlap，我们一步都不跑**。
+		/// 更糟的是这条沿上没有任何东西能事后查到：<c>Updated</c> 在同一渲染帧的 <c>Cleanup</c>
+		/// （<c>GameManager.PostUpdateWorld</c>，同样每渲染帧跑）就被摘掉了，所以我们恢复运行的第一步
+		/// 看到的闸门是空的——这就是那局日志里 <c>Rebuild gate: 0 frame(s)</c> 与"条目明明回来了"
+		/// 能同时成立的原因。
+		///
+		/// 判据只用两个现成的计数器：<c>UnityEngine.Time.frameCount</c>（渲染帧，暂停也涨）与
+		/// <c>SimulationSystem.frameIndex</c>（模拟步，只有真跑了才涨）。时间戳每步复位，所以差值量的就是
+		/// "连续多少渲染帧没产出任何模拟步"；累积到 <see cref="kBlindFrameMargin"/> 帧即说明中间有一段
+		/// "只跑 MainLoop 不跑 GameSimulation"的时间，原版有充分机会改写 overlap。
+		/// ⚠ 别把这条读成"只有暂停才会命中"：寻路积压与 FrameRate 偏好也能把每帧步数夹到 0
+		/// （<c>research/Game.Simulation.SimulationSystem.cs:240-256</c>），那时原版照样在每帧重建，
+		/// 所以命中不是误报，只是频率会高一些——上限由下面的两个节流夹住。
+		/// 命中后不自己动数据，只置两个既有信号位：出入口模式走 <c>gateUrgent</c> 起一轮整轮重建
+		/// （交换点的集合批删会重剥），全局模式走 <see cref="ShouldSweepGlobal"/> 起一次全城重剥。
+		/// 两者都各自带节流（<see cref="kGateRebuildMinGap"/> / 起轮后清信号），不会变成每步扫描。</summary>
+		private void DetectBlindWindow()
+		{
+			uint frameIndex = m_SimulationSystem.frameIndex;
+			int renderFrame = UnityEngine.Time.frameCount;
+			if (m_LastStepRenderFrame >= 0)
+			{
+				int skipped = renderFrame - m_LastStepRenderFrame - (int)(frameIndex - m_LastStepFrameIndex);
+				if (skipped >= kBlindFrameMargin)
+				{
+					m_BlindWindows++;
+					m_GateSeenSinceRebuild = true;
+					m_GlobalSweepSignal = true;
+				}
+			}
+			m_LastStepFrameIndex = frameIndex;
+			m_LastStepRenderFrame = renderFrame;
+		}
+
+		/// <summary>v0.8.7：全局模式要不要再起一次全城重剥。判据与 <see cref="ShouldRebuildAccessSets"/>
+		/// 逐条对齐，因为两者的病因相同（"原版改写过，我们没跟上"）：
+		/// ① 有信号（暂停窗口）就直接放行，但要隔够 <see cref="kGateRebuildMinGap"/> 步，
+		/// 免得连续暂停/连续施工把全城扫描变成满负荷；② 每 <see cref="kSetRebuildCheckInterval"/> 步
+		/// 看一眼候选车道数（两次 CalculateEntityCount，按 archetype 计数，成本可忽略）；
+		/// ③ 完全没动静时 <see cref="kSetRebuildFallback"/> 步兜底一次。
+		/// ⚠ 这里**不**把真实闸门（<c>m_GateSeenSinceRebuild</c>）当触发器：闸门开的时候 (0) 那批
+		/// 已经按同一批实体重剥过了，再扫全城就是 v0.8.4 压下去的那笔重复开销。全局重剥只补
+		/// "闸门看不见的窗口"和"车道数变了"这两种情况。</summary>
+		private bool ShouldSweepGlobal(uint frameIndex)
+		{
+			// 兜底先答：它本身就远大于最小间隔，不需要再夹。⚠ v0.8.9：步数到了还要墙钟也够
+			// kFallbackMinSeconds——步数量在高速档会被同比压缩（见常量注释的实机读数）。
+			if (frameIndex - m_LastSweepFrame >= (uint)kSetRebuildFallback
+				&& UnityEngine.Time.realtimeSinceStartup - m_LastSweepTime >= kFallbackMinSeconds)
+			{
+				return true;
+			}
+			// 其余触发一律隔够 kGateRebuildMinGap。这里必须夹：一轮 sweep 是**一次**全城 chunk
+			// 迭代（不像出入口模式那样分 63 步摊开），施工期候选数每个 512 步检查点都在变，
+			// 不夹间隔就等于每 4 秒满负荷扫一次全城——正是 v0.8.5 被审查代理抓出来的那个回归形状。
+			if (frameIndex - m_LastSweepFrame < (uint)kGateRebuildMinGap)
+			{
+				return false;
+			}
+			if (m_GlobalSweepSignal)
+			{
+				return true;
+			}
+			if (frameIndex % kSetRebuildCheckInterval != 0)
+			{
+				return false;
+			}
+			// v0.8.9（独立复核 #4）：本周期原版闸门开过 ⇒ 干预点 (0) 已经按同一批实体当帧重删过了，
+			// 再扫全城就是把同一份活干第二遍（正是 v0.8.4 压下去的那笔重复开销；注释一直这么写、
+			// 代码没真做）。闸门标记在**起 sweep 时**清（见上面全局剥离那段），所以这里只是"这轮先让路"，
+			// 不会把它永久卡死；暂停窗口走的是 m_GlobalSweepSignal，在上面已经答掉，不受这条影响。
+			// ⚠ 必须放在检查点判据**之后**：本方法每个模拟步都会被调用，放在前面会让 skipped
+			// 这个读数每步 +1，把"每个检查点跳过一次"的含义冲淡掉。
+			if (m_GateSeenSinceRebuild)
+			{
+				m_GlobalSweepSkips++;
+				return false;
+			}
+			// v0.8.9：门槛比的是"这一个检查点间隔内的净变化"，基线每个检查点都前移。旧写法拿
+			// "上一次起 sweep 时的数量"当基线，于是 ±几条的车位/临时车道抖动（实机 6745 ↔ 6739）
+			// 与"新铺了一条路"完全等价。⚠ 那局 8~19 秒的 sweep 间隔本身不是这条判据造成的
+			// （见上面兜底那段：v0.8.9 日志里 Δ=0、34 次 skipped，是 8192 步兜底在高步率下的长度）。
+			int now = m_OverlapQuery.CalculateEntityCount();
+			m_SweepCountPrev = m_LastSweepCandidates;
+			m_SweepCountNow = now;
+			m_LastSweepCandidates = now;
+			if (m_SweepCountPrev < 0)
+			{
+				return true;
+			}
+			int delta = now >= m_SweepCountPrev ? now - m_SweepCountPrev : m_SweepCountPrev - now;
+			if (delta >= kSweepCountMinDelta || (m_SweepCountPrev > 0 && delta * 100 >= m_SweepCountPrev * kSweepCountMinPercent))
+			{
+				return true;
+			}
+			m_GlobalSweepSkips++;
+			return false;
+		}
+
+		/// <summary>把全局重剥的诊断计数数组扩到能容纳 <paramref name="chunkCount"/> 个 chunk
+		/// （每块两格）。与 <see cref="EnsureRepairCapacity"/> 同构，只在真要扩容时 WaitForJobs()。</summary>
+		private void EnsureSweepCapacity(int chunkCount)
+		{
+			if (chunkCount <= m_SweepCounterChunks)
+			{
+				return;
+			}
+			WaitForJobs();
+			if (m_SweepCounters.IsCreated)
+			{
+				m_SweepCounters.Dispose();
+			}
+			m_SweepCounterChunks = chunkCount + (chunkCount >> 2) + 16;
+			m_SweepCounters = new NativeArray<int>(m_SweepCounterChunks * 2, Allocator.Persistent, NativeArrayOptions.ClearMemory);
 		}
 
 		/// <summary>把诊断计数数组扩到能容纳 <paramref name="chunkCount"/> 个 chunk（每块两格）。
@@ -1124,12 +1561,21 @@ namespace AccessAnarchy.Systems
 		}
 
 		/// <summary>
-		/// 心跳自证日志（v0.8.0）。用户回报「某个出入口仍会避让」时先看这三行：
+		/// 心跳自证日志（v0.8.0）。用户回报「某个出入口仍会避让」时先看这五行：
 		/// ① Rebuild gate —— 原版这一阵子改写过 overlap 没有、我们跟上了多少；
 		/// ② Anchor grid —— 锚点容量有没有被卡掉（卡掉就会有邻近车道判不出靠出入口）；
-		/// ③ Access set audit —— 集合内的车辆车道此刻还留着几条行人条目。
-		/// ①非零而③也非零 = 我们没跟全（漏口还在）；①=0 且③=0 却仍然避让 = 不是 LaneOverlap 这条通道，
-		/// 而是类注释 v0.7.2 里保留的原版行为（行人就站在车道本体上、或行人静止不动被当成静态障碍）。
+		/// ③ Access set audit —— 集合内的车辆车道此刻还留着几条行人条目；
+		/// ④ Overlap coverage（v0.8.6，仅全局模式）—— 全城车辆持有者 / 其中路网与路口持有者
+		/// 此刻还留着几条行人条目；
+		/// ⑤ Global sweep driver（v0.8.7，仅全局模式）—— 全城重剥跑了几次、其中几次是被
+		/// "暂停窗口"探测器叫起来的、这一阵子又叫走了多少条行人条目。
+		/// ①非零而③也非零 = 我们没跟全（漏口还在）；①=0 且③④都=0 却仍然避让 = 不是 LaneOverlap 这条通道，
+		/// 而是类注释 v0.7.2 与本文件 v0.8.6 段列出的那五类原版行为（信号灯、停车/让行标志位、
+		/// 路口被前车占满、行人本体站在车道上、车压在行人道上被限速）。
+		/// ⚠ ④紧跟在一次重建之后可能读到短暂的残留值：原版在 Modification4B 重写、我们在同一个模拟步
+		/// 排删、帧末才回放，所以判"漏口"要看连续两次数值一致，单次非零不算。
+		/// ⚠ v0.8.7 起 ①=0 **不再等于"原版没改写过"**——暂停期间原版照样改写而我们整段不跑，
+		/// 那次数的只是"我们醒着时看到的闸门"。要看穿这段窗口读 ⑤ 的 blind window 计数。
 		/// v0.8.3 三合一：这里不再有第四行 `Scope census`（按勾选项普查的机器随勾选框一起删除）。
 		/// </summary>
 		private void ReportRebuildDiagnostics(bool globalMode)
@@ -1145,12 +1591,24 @@ namespace AccessAnarchy.Systems
 				m_RepairCounters[i * 2] = 0;
 				m_RepairCounters[i * 2 + 1] = 0;
 			}
+			// v0.8.7：全局重剥自己的两格计数（闸门重删用的是上面那份，两个成因不能混）。
+			int sweepWrites = 0;
+			int sweepEntries = 0;
+			for (int i = 0; i < m_SweepCounterChunks; i++)
+			{
+				sweepWrites += m_SweepCounters[i * 2];
+				sweepEntries += m_SweepCounters[i * 2 + 1];
+				m_SweepCounters[i * 2] = 0;
+				m_SweepCounters[i * 2 + 1] = 0;
+			}
+			// v0.8.6：全城覆盖率扫描的条件要在这里取——下面就把 m_GateFrames 清零了。
+			bool hadOverlapActivity = m_GateFrames > 0 || lanes > 0;
 			if (m_GateFrames != m_LastGateFrames || lanes != m_LastGateLanes || entries != m_LastGateEntries)
 			{
 				m_LastGateFrames = m_GateFrames;
 				m_LastGateLanes = lanes;
 				m_LastGateEntries = entries;
-				AccessAnarchyMod.log.Info($"Rebuild gate: {m_GateFrames} frame(s) with vanilla LaneOverlap rebuild this period, last gate {m_GateLastOwners} owner(s); re-stripped {lanes} lane(s) / {entries} pedestrian entries (per-chunk counter slots: {m_RepairCounterChunks}).");
+				AccessAnarchyMod.log.Info($"Rebuild gate: {m_GateFrames} frame(s) with vanilla LaneOverlap rebuild this period, last gate {m_GateLastOwners} owner(s); re-stripped {lanes} SetBuffer write(s) / {entries} pedestrian entries (writes, not distinct lanes: the reverse hop can reach one lane from several owners; counter slots: {m_RepairCounterChunks}).");
 			}
 			m_GateFrames = 0;
 			m_GateLastOwners = 0;
@@ -1188,16 +1646,60 @@ namespace AccessAnarchy.Systems
 			{
 				m_LastLoggedRounds = m_RebuildRounds;
 				m_LastLoggedSkips = m_RebuildSkips;
-				AccessAnarchyMod.log.Info($"Access-zone rebuild driver: {m_RebuildRounds} round(s) started, {m_RebuildSkips} check(s) skipped as unchanged (check every {kSetRebuildCheckInterval} steps, fallback every {kSetRebuildFallback}).");
+				AccessAnarchyMod.log.Info($"Access-zone rebuild driver: {m_RebuildRounds} round(s) started, {m_RebuildSkips} check(s) skipped (unchanged, jitter below gate, or change not yet seen twice) (check every {kSetRebuildCheckInterval} steps, fallback every {kSetRebuildFallback} steps or {kFallbackMinSeconds:0}s, whichever is later).");
 			}
 
-			if (!globalMode && m_SetsInitialized)
+			// v0.8.7 的自证行：全局模式的重剥到底跑没跑、跑的时候有没有活可剥。
+			// 这一行是本轮两条反馈的判据：
+			// · blind windows > 0 且 re-stripped 条目 > 0 ⇒ "暂停期原版改写、全局模式再也没跟"这个
+			//   根因成立，作者看到的"开了全局反而不生效"从此会在 ≤256 步内自愈；
+			// · blind windows > 0 而 re-stripped 一直是 0 ⇒ 暂停窗口没造成丢失，得换方向查
+			//   （这时看 Overlap coverage 与它新加的 leak sample 行）；
+			// · sweeps 在涨而 writes 一直是 0 是正常稳态（重剥只读不写）。
+			// 去重：只在四个数真的变了时才写，skipped 不进判据（它每个检查点都 +1，会把这行刷满）。
+			if (m_GlobalSweeps != m_LastLoggedSweeps || m_BlindWindows != m_LastLoggedBlindWindows
+				|| sweepWrites != m_LastLoggedSweepWrites || sweepEntries != m_LastLoggedSweepEntries)
 			{
+				m_LastLoggedSweeps = m_GlobalSweeps;
+				m_LastLoggedBlindWindows = m_BlindWindows;
+				m_LastLoggedSweepWrites = sweepWrites;
+				m_LastLoggedSweepEntries = sweepEntries;
+				AccessAnarchyMod.log.Info($"Global sweep driver: {m_GlobalSweeps} sweep(s) run ({m_GlobalSweepSkips} check(s) skipped: unchanged or the gate already re-stripped this period), {m_BlindWindows} blind window(s) where the game rebuilt while we were not stepping; this period re-stripped {sweepWrites} SetBuffer write(s) / {sweepEntries} pedestrian entries (overlap entities {m_SweepCountPrev} -> {m_SweepCountNow}, gate {kSweepCountMinDelta} / {kSweepCountMinPercent}%; check every {kSetRebuildCheckInterval} steps, signal gap {kGateRebuildMinGap}, fallback every {kSetRebuildFallback} steps or {kFallbackMinSeconds:0}s, whichever is later).");
+			}
+
+			// v0.8.9（独立复核 #11）：出入口审计原来是**每心跳无条件跑**——它是串行遍历整个集合
+			// （O(集合)，v0.8.4 实机形状 6.5 万条 ⇒ 主线程阻塞 15~40 ms），每 1800 步付一次。
+			// "该剥没剥干净"只可能在有东西改写过 overlap（闸门/我们重删/刚起完一轮）之后出现，
+			// 所以改成有事件才扫；同时保留"每 4 个心跳一次"的慢兜底——探测器和被探测者不能是同一样东西
+			// （v0.8.6 那行假证据的教训，见开发笔记 §⑯-10），完全没动静的图也至少每 ~4×心跳读一次。
+			bool auditDue = hadOverlapActivity || sweepWrites > 0 || m_RebuildRounds != m_LastAuditedRounds
+				|| m_TotalPasses % (kHeartbeatInterval * 4) == 0;
+			if (!globalMode && m_SetsInitialized && auditDue)
+			{
+				m_LastAuditedRounds = m_RebuildRounds;
 				AuditAccessSet();
+			}
+
+			// v0.8.6：全局模式的覆盖率读数。v0.8.7 把触发条件补成三种——
+			// ① 首次全量/每一次全城重剥刚跑完（m_CoverageDue，由 (1) 与 sweep 共同置位）；
+			// ② 这个周期里原版真的改写过 overlap 或我们重删过（hadOverlapActivity）；
+			// ③ 这一阵子全城重剥又叫走过条目（sweepWrites > 0）——这正是"上次读 0、这次不 0"的现场，
+			// 没有它的话 v0.8.6 那行 0 只能代表切模式后 4 秒，之后多久漏了都不知道。
+			// 稳态不扫：v0.8.4 的教训就是诊断本身不能变成每条模拟步的固定税。
+			// v0.8.9（独立复核 #10）：这条扫描要 WaitForJobs + 全城并行迭代 + 主线程求和（大城 10~30 ms），
+			// 而施工期 hadOverlapActivity 每心跳都为真 ⇒ 它自己变成一笔常态税。现在 ②③ 两路只在
+			// "每 4 个心跳一次的采样点"才扫；① m_CoverageDue（刚做过全量/全城重剥）保持即时——
+			// 那一次读数正是"重剥到底有没有效"的证据，不能跟着降频。
+			if (globalMode && (m_CoverageDue || ((hadOverlapActivity || sweepWrites > 0) && m_TotalPasses % (kHeartbeatInterval * 4) == 0)))
+			{
+				m_CoverageDue = false;
+				ReportOverlapCoverage();
 			}
 		}
 
-		/// <summary>邻域集合当前是不是干净的（成本 O(集合)，不是 O(全城)）。</summary>
+		/// <summary>邻域集合当前是不是干净的（成本 O(集合)，不是 O(全城)）。
+		/// 只在出入口模式下调用，所以模式常量直接传 kModeAccessOnly——审计口径必须与
+		/// StripAccessOverlapsFromSetJob / StripPedestrianOverlapsJob 一致，见 <see cref="CrosswalkScopeFor"/>。</summary>
 		private void AuditAccessSet()
 		{
 			NativeHashSet<Entity> set = m_VehicleSets[m_ActiveSetIndex];
@@ -1212,6 +1714,14 @@ namespace AccessAnarchy.Systems
 				m_Overlaps = GetBufferLookup<LaneOverlap>(isReadOnly: true),
 				m_PedestrianLaneData = GetComponentLookup<PedestrianLane>(isReadOnly: true),
 				m_ConnectionLaneData = GetComponentLookup<ConnectionLane>(isReadOnly: true),
+				m_GarageLaneData = GetComponentLookup<GarageLane>(isReadOnly: true),
+				m_AreaLaneData = GetComponentLookup<AreaLane>(isReadOnly: true),
+				m_CarLaneData = GetComponentLookup<CarLane>(isReadOnly: true),
+				m_ParkingLaneData = GetComponentLookup<ParkingLane>(isReadOnly: true),
+				m_OwnerData = GetComponentLookup<Owner>(isReadOnly: true),
+				m_EdgeData = GetComponentLookup<Edge>(isReadOnly: true),
+				m_NodeData = GetComponentLookup<Node>(isReadOnly: true),
+				m_Mode = Setting.kModeAccessOnly,
 				m_Counters = counters
 			};
 			// 传进自持链 m_JobChain（不是 Dependency —— 游戏多步模拟第 2 步起会把它清成 default，见字段注释）。
@@ -1225,7 +1735,7 @@ namespace AccessAnarchy.Systems
 				m_LastAuditSet = set.Count;
 				m_LastAuditLanes = lanesWithEntries;
 				m_LastAuditEntries = entries;
-				AccessAnarchyMod.log.Info($"Access set audit: {lanesWithEntries} of {set.Count} vehicle lanes still hold {entries} pedestrian overlap entries (0 = clean, crosswalk entries excluded by design).");
+				AccessAnarchyMod.log.Info($"Access set audit: {lanesWithEntries} of {set.Count} vehicle lanes still hold {entries} pedestrian overlap entries (0 = clean; crosswalk entries on street lanes are kept by design and are not counted).");
 			}
 		}
 
@@ -1368,16 +1878,35 @@ namespace AccessAnarchy.Systems
 			m_EndFrameBarrier.AddJobHandleForProducer(m_JobChain);
 		}
 
-		/// <summary>
-		/// 全城扫一遍车辆车道的 LaneOverlap，统计指向行人道的条目数，并单列其中指向人行横道的部分。
-		/// 分块并行 + 主线程同步求和（每轮开关跳变后才跑，成本可接受）。
-		/// 返回 false = 没有匹配到车辆车道（无数据可判）。</summary>
-		private bool ScanPedestrianOverlaps(out int lanes, out int entries, out int crosswalkLanes, out int crosswalkEntries)
+		/// <summary>全城审计的合计，字段与 <see cref="kAuditCountersPerChunk"/> 的槽位一一对应
+		/// （见 <see cref="AuditPedestrianOverlapsJob"/> 的注释）。用结构体而不是十个 out 参数：
+		/// v0.8.6 加了按持有者分类的四格之后，out 参数已经比调用方真正读的数多三倍了。</summary>
+		private struct AuditTotals
 		{
-			lanes = 0;
-			entries = 0;
-			crosswalkLanes = 0;
-			crosswalkEntries = 0;
+			public int m_Lanes;
+			public int m_Entries;
+			public int m_CrosswalkLanes;
+			public int m_CrosswalkEntries;
+			public int m_VehicleLanes;
+			public int m_VehicleEntries;
+			public int m_RoadLanes;
+			public int m_RoadEntries;
+			public int m_VehicleScanned;
+			public int m_RoadScanned;
+		}
+
+		/// <summary>
+		/// 全城扫一遍车辆车道的 LaneOverlap，统计指向行人道的条目数，并单列其中指向人行横道的部分
+		/// 与按持有者分类的那几格。分块并行 + 主线程同步求和（只在基线、恢复检查与"刚有重建发生过"
+		/// 的心跳里跑，稳态不跑）。返回 false = 没有匹配到车道（无数据可判）。
+		/// v0.8.7 多一个 <paramref name="collectSamples"/>：只有覆盖率那一次需要顺带采残留条目样本，
+		/// 采样数组随之交回调用方（**调用方负责 Dispose**；传 false 时返回的是未创建的默认值）。
+		/// 基线与恢复检查两条沿不采——它们要的是总数，多分配一个 Persistent 数组反而带来
+		/// "卸载时谁释放它"的新问题（见 <see cref="OnDestroy"/> 的卸载安全约束）。</summary>
+		private bool ScanPedestrianOverlaps(out AuditTotals totals, out NativeArray<int> samples, bool collectSamples)
+		{
+			totals = default(AuditTotals);
+			samples = default(NativeArray<int>);
 			WaitForJobs();
 			int chunkCount = m_OverlapQuery.CalculateChunkCountWithoutFiltering();
 			if (chunkCount <= 0)
@@ -1385,24 +1914,128 @@ namespace AccessAnarchy.Systems
 				return false;
 			}
 			NativeArray<int> counters = new NativeArray<int>(chunkCount * kAuditCountersPerChunk, Allocator.TempJob);
+			if (collectSamples)
+			{
+				// 每 chunk 一格、新建即清零（0 = 本块没有样本）。用完由调用方 Dispose。
+				samples = new NativeArray<int>(chunkCount * kAuditSamplePerChunk, Allocator.TempJob);
+			}
 			AuditPedestrianOverlapsJob auditJob = new AuditPedestrianOverlapsJob
 			{
+				m_EntityType = GetEntityTypeHandle(),
 				m_OverlapType = GetBufferTypeHandle<LaneOverlap>(isReadOnly: true),
+				m_CarLaneType = GetComponentTypeHandle<CarLane>(isReadOnly: true),
+				m_ParkingLaneType = GetComponentTypeHandle<ParkingLane>(isReadOnly: true),
+				m_GarageLaneType = GetComponentTypeHandle<GarageLane>(isReadOnly: true),
+				m_ConnectionLaneType = GetComponentTypeHandle<ConnectionLane>(isReadOnly: true),
+				m_AreaLaneType = GetComponentTypeHandle<AreaLane>(isReadOnly: true),
+				m_PedestrianLaneType = GetComponentTypeHandle<PedestrianLane>(isReadOnly: true),
 				m_PedestrianLaneData = GetComponentLookup<PedestrianLane>(isReadOnly: true),
 				m_ConnectionLaneData = GetComponentLookup<ConnectionLane>(isReadOnly: true),
-				m_Counters = counters
+				m_OwnerData = GetComponentLookup<Owner>(isReadOnly: true),
+				m_EdgeData = GetComponentLookup<Edge>(isReadOnly: true),
+				m_NodeData = GetComponentLookup<Node>(isReadOnly: true),
+				m_CurveData = GetComponentLookup<Curve>(isReadOnly: true),
+				m_Counters = counters,
+				m_Samples = samples
 			};
 			auditJob.ScheduleParallel(m_OverlapQuery, m_JobChain).Complete();
 			for (int i = 0; i < chunkCount; i++)
 			{
 				int baseIndex = i * kAuditCountersPerChunk;
-				lanes += counters[baseIndex];
-				entries += counters[baseIndex + 1];
-				crosswalkLanes += counters[baseIndex + 2];
-				crosswalkEntries += counters[baseIndex + 3];
+				totals.m_Lanes += counters[baseIndex + kAuditLanes];
+				totals.m_Entries += counters[baseIndex + kAuditEntries];
+				totals.m_CrosswalkLanes += counters[baseIndex + kAuditCrosswalkLanes];
+				totals.m_CrosswalkEntries += counters[baseIndex + kAuditCrosswalkEntries];
+				totals.m_VehicleLanes += counters[baseIndex + kAuditVehicleLanes];
+				totals.m_VehicleEntries += counters[baseIndex + kAuditVehicleEntries];
+				totals.m_RoadLanes += counters[baseIndex + kAuditRoadLanes];
+				totals.m_RoadEntries += counters[baseIndex + kAuditRoadEntries];
+				totals.m_VehicleScanned += counters[baseIndex + kAuditVehicleScanned];
+				totals.m_RoadScanned += counters[baseIndex + kAuditRoadScanned];
 			}
 			counters.Dispose();
 			return true;
+		}
+
+		/// <summary>v0.8.6 的"路口到底有没有被剥干净"读数：只在首次全量/全城重剥之后、
+		/// 或该周期真发生过重建/重剥时扫（判读方法见 <see cref="ReportRebuildDiagnostics"/> 的注释）。
+		/// v0.8.7 顺带把残留条目样本打出来——只有真数到残留才会多写这几行。</summary>
+		private void ReportOverlapCoverage()
+		{
+			if (!ScanPedestrianOverlaps(out AuditTotals totals, out NativeArray<int> samples, collectSamples: true))
+			{
+				return;
+			}
+			if (totals.m_VehicleScanned <= 0)
+			{
+				if (samples.IsCreated)
+				{
+					samples.Dispose();
+				}
+				return;
+			}
+			string line = $"Overlap coverage (global): vehicle lanes {totals.m_VehicleLanes} of {totals.m_VehicleScanned} still hold {totals.m_VehicleEntries} pedestrian entries; street & intersection lanes {totals.m_RoadLanes} of {totals.m_RoadScanned} hold {totals.m_RoadEntries} (crosswalk entries {totals.m_CrosswalkEntries} across all holders).";
+			if (line != m_LastCoverageLine)
+			{
+				m_LastCoverageLine = line;
+				AccessAnarchyMod.log.Info(line);
+				// 样本跟着覆盖率行一起去重：漏口只要存在就会每个心跳都数到，
+				// 不绑在这行的"变了才写"上就会变成每 ~30 秒 3 行 WARN 的新刷屏源
+				// （v0.8.4 玩家拿着一屏 WARN 来反馈"模组一直在报警"就是这么来的）。
+				if (totals.m_VehicleLanes > 0)
+				{
+					LogLeakSamples(samples);
+				}
+			}
+			samples.Dispose();
+		}
+
+		/// <summary>v0.8.7：把 <see cref="AuditPedestrianOverlapsJob"/> 采到的残留条目写成人能读的一行。
+		/// 样本是每 chunk 一格，所以这里按槽扫过去、最多打 <see cref="kAuditSampleCount"/> 条。
+		/// 每条给出：持有者实体号、类型位、归不归路网、曲线中点坐标（作者可以按坐标飞过去看），
+		/// 以及对端实体号与它的 PedestrianLane/ConnectionLane flags。
+		/// 目的只有一个：把"某一边的人行横道没生效"从肉眼观察变成能定位的数据。</summary>
+		private void LogLeakSamples(NativeArray<int> samples)
+		{
+			if (!samples.IsCreated)
+			{
+				return;
+			}
+			int printed = 0;
+			for (int chunk = 0; chunk * kAuditSamplePerChunk < samples.Length && printed < kAuditSampleCount; chunk++)
+			{
+				int b = chunk * kAuditSamplePerChunk;
+				int hit = samples[b];
+				if (hit <= 0)
+				{
+					continue;
+				}
+				printed++;
+				int bits = samples[b + 5];
+				string holderTypes = (bits & 1) != 0 ? "CarLane" : string.Empty;
+				AppendType(ref holderTypes, bits, 2, "ParkingLane");
+				AppendType(ref holderTypes, bits, 4, "GarageLane");
+				AppendType(ref holderTypes, bits, 8, "ConnectionLane");
+				AppendType(ref holderTypes, bits, 16, "AreaLane");
+				AppendType(ref holderTypes, bits, 32, "PedestrianLane");
+				AppendType(ref holderTypes, bits, 64, "building-owned");
+				string pedFlags = ((PedestrianLaneFlags)samples[b + 6]).ToString();
+				string connFlags = ((ConnectionLaneFlags)samples[b + 7]).ToString();
+				// 实体号先拼成局部变量再进插值串：`{a}:{b}` 里那个冒号会被编译器当成
+				// 格式说明符的起点（CS1003/CS1056），别在插值洞里写裸冒号。
+				string holderId = samples[b + 1] + ":" + samples[b + 2];
+				string targetId = samples[b + 3] + ":" + samples[b + 4];
+				string position = samples[b + 8] + ", " + samples[b + 9];
+				AccessAnarchyMod.log.Warn($"Overlap leak sample: lane {holderId} [{holderTypes}] at ({position}) holds {hit} pedestrian entry/entries, first target {targetId} pedFlags={pedFlags} connFlags={connFlags}");
+			}
+		}
+
+		private static void AppendType(ref string types, int bits, int bit, string name)
+		{
+			if ((bits & bit) != 0)
+			{
+				types += types.Length > 0 ? "|" + name : name;
+			}
 		}
 
 		/// <summary>
@@ -1426,11 +2059,14 @@ namespace AccessAnarchy.Systems
 			}
 			m_AuditPhase = kAuditIdle;
 			m_AuditChecks++;
-			if (!ScanPedestrianOverlaps(out int lanes, out int entries, out int crosswalkLanes, out int crosswalkEntries))
+			if (!ScanPedestrianOverlaps(out AuditTotals scan, out _, collectSamples: false))
 			{
 				AccessAnarchyMod.log.Warn($"Restore check #{m_AuditChecks}: skipped, no vehicle lanes matched.");
 				return;
 			}
+			int lanes = scan.m_Lanes;
+			int entries = scan.m_Entries;
+			int crosswalkEntries = scan.m_CrosswalkEntries;
 			int nonCrosswalk = entries - crosswalkEntries;
 			// 主判据：这个模式下"我们一定删过的那一类"条目回来了没有——
 			// 出入口模式横道条目从未被动过（v0.7.7 就是被这几万条横道条目糊弄成"已恢复"的），
@@ -1439,7 +2075,7 @@ namespace AccessAnarchy.Systems
 			// 有基线再加一道总量闸：条目数得回到基线的 8 成（留 2 成给期间修路/拆路）。
 			bool enough = !m_BaselineTaken || m_BaselineEntries <= 0 || entries >= (m_BaselineEntries * 4) / 5;
 			bool restored = classBack && enough;
-			AccessAnarchyMod.log.Info($"Restore check #{m_AuditChecks} ({(m_RestoreCheckGlobal ? "global" : "access-zones")}): {lanes} vehicle lanes, {entries} pedestrian entries (crosswalk {crosswalkEntries}, non-crosswalk {nonCrosswalk}) vs baseline {m_BaselineEntries} (crosswalk {m_BaselineCrosswalk}) - {(restored ? "vanilla avoidance restored" : $"NOT restored (classBack={classBack} enough={enough})")}.");
+			AccessAnarchyMod.log.Info($"Restore check #{m_AuditChecks} ({(m_RestoreCheckGlobal ? "global" : "access-zones")}): {lanes} lanes, {entries} pedestrian entries (crosswalk {crosswalkEntries}, non-crosswalk {nonCrosswalk}) vs baseline {m_BaselineEntries} (crosswalk {m_BaselineCrosswalk}); vehicle holders {scan.m_VehicleEntries} entries on {scan.m_VehicleLanes}/{scan.m_VehicleScanned} lane(s), street & intersection {scan.m_RoadEntries} on {scan.m_RoadLanes}/{scan.m_RoadScanned} - {(restored ? "vanilla avoidance restored" : $"NOT restored (classBack={classBack} enough={enough})")}.");
 			if (restored)
 			{
 				return;
@@ -1466,7 +2102,9 @@ namespace AccessAnarchy.Systems
 		private bool ShouldRebuildAccessSets(uint frameIndex)
 		{
 			// 长兜底先答，避免在下面做两次计数查询（也保证兜底不会被检查节奏错过）。
-			if (frameIndex - m_LastRebuildFrame >= (uint)kSetRebuildFallback)
+			// v0.8.9：同 ShouldSweepGlobal，步数之外再要墙钟够 kFallbackMinSeconds。
+			if (frameIndex - m_LastRebuildFrame >= (uint)kSetRebuildFallback
+				&& UnityEngine.Time.realtimeSinceStartup - m_LastRebuildTime >= kFallbackMinSeconds)
 			{
 				return true;
 			}
@@ -1481,15 +2119,44 @@ namespace AccessAnarchy.Systems
 			int anchors = m_AnchorQuery.CalculateEntityCount();
 			if (anchors != m_LastAnchorCount)
 			{
+				// v0.8.9（独立复核 #3）：这个计数和"车辆集合条数"是同一批实体的读数，会被停车场/临时车道
+				// 来回增减——本局 `AccessZoneOverlapSystem heartbeat` 里的 vehicle set 就是
+				// 3596 → 3593 → 3587 → 3592（复核报告另外给过锚点数的同类读数 5064 → 5042 → 5057，
+				// 那份日志已被覆盖、此处无法复核，只当旁证）。旧写法只要 != 就起轮，于是每个 512 步
+				// 检查点都能凑出一轮整城重建。改成**持续变化才算数**：同一个新数值被连续两个检查点看到
+				// 才起轮（一次真正的施工会把新数字留在那里，最迟第二个检查点接住；作者这局实测
+				// ≈225 步/秒 ⇒ 一个检查点 ≈2.3 秒，代价就是新出入口最多晚 2.3 秒），来回抖的噪声
+				// 永远凑不出两个相同的值。本局锚点数是单调增长 5168→5185→5189→5219→5220，
+				// 五轮照常起（`Access-zone rebuild driver` 从 1 涨到 8），说明去重没挡住真施工。
+				if (anchors == m_AnchorSeenPrev)
+				{
+					m_AnchorSeenPrev = -1;
+					return true;
+				}
+				m_AnchorSeenPrev = anchors;
+			}
+			else
+			{
+				m_AnchorSeenPrev = -1;
+			}
+			// v0.8.9：候选数只在**变化量够大**时才算"城市变了"。带 LaneOverlap 的实体数在活城里
+			// 长期来回抖动（车位/临时车道，实机 6745 ↔ 6739），旧写法每个检查点都判"变了"，
+			// 于是整轮重建变成每 512 步一次。锚点数那条判据不动，所以"新建筑带来新出入口"
+			// 仍然当检查点触发（新建筑的锚点必变）；这里只挡住纯抖动，小变化靠 8192 步兜底接住。
+			int candidates = m_OverlapQuery.CalculateEntityCount();
+			int candidatePrev = m_LastCandidateCount;
+			m_LastCandidateCount = candidates;
+			if (candidatePrev < 0)
+			{
 				return true;
 			}
-			int candidates = m_OverlapQuery.CalculateEntityCount();
-			if (candidates == m_LastCandidateCount)
+			int candidateDelta = candidates >= candidatePrev ? candidates - candidatePrev : candidatePrev - candidates;
+			if (candidateDelta >= kRebuildCandidateMinDelta || (candidatePrev > 0 && candidateDelta * 100 >= candidatePrev * kRebuildCandidateMinPercent))
 			{
-				m_RebuildSkips++;
-				return false;
+				return true;
 			}
-			return true;
+			m_RebuildSkips++;
+			return false;
 		}
 
 		private bool AdvanceAccessSets(Setting setting, uint frameIndex)
@@ -1509,6 +2176,7 @@ namespace AccessAnarchy.Systems
 				// 只在起轮时打时间戳是不够的：一轮本身要几十步，闸门在这几十步里几乎每步都开，
 				// 于是本轮一结束 gateUrgent 就立刻成立，施工期变成满负荷连续重建。
 				m_LastRebuildFrame = frameIndex;
+				m_LastRebuildTime = UnityEngine.Time.realtimeSinceStartup;
 				m_GateSeenSinceRebuild = false;
 				int buildIndex = 1 - m_ActiveSetIndex;
 				m_VehicleSets[buildIndex].Clear();
@@ -1645,9 +2313,12 @@ namespace AccessAnarchy.Systems
 		/// "进了集合却判不成范围内"这类互相漏口的现象。
 		/// 全局模式：所有车辆车道（含指向人行横道的条目，见 v0.7.7）。
 		/// 出入口模式（v0.8.3 三合一）：出入口/建筑内部道路类车道 / 邻域集合成员 / 锚点邻域，三选一。
-		/// ⚠ 人行横道不受这里影响：出入口模式一律传 includeCrosswalks=0，指向人行横道的条目永不删除
-		/// （v0.5 的横道误伤修复），所以普通道路上的行人过街照常避让——作者 2026-10-01 明确要求
-		/// 合并三类后"出入口依然不要影响人行横道等正常道路的避让"，靠的就是这一条 + 邻近兜底只服务出入口。
+		/// ⚠ 本方法只管"这条车道在不在范围内"，**不决定横道条目删不删**：那一份判据在
+		/// <see cref="CrosswalkScopeFor"/>（v0.8.6 起按持有者分类，出入口模式只有资产内部车道的
+		/// 横道条目会被删，靠邻近兜底进来的市政道路/路口车道一条都不删——那是 v0.5 横道误伤的修复，
+		/// 也是作者 2026-10-01「出入口依然不要影响人行横道等正常道路的避让」与 2026-10-06
+		/// 「要删也可以的，不要影响道路上的横道就行」两条要求合起来指向的位置）。
+		/// 两处都还要配合"邻近兜底只服务出入口"这一点，别把其中一个改回一刀切。
 		/// </summary>
 		private static bool IsInNoYieldScope(Entity lane, int mode, NativeHashSet<Entity> vehicleSet,
 			ComponentLookup<Curve> curveData, NativeHashMap<int2, FixedList128Bytes<float2>> grid,
@@ -1672,7 +2343,7 @@ namespace AccessAnarchy.Systems
 					return true;
 				}
 				if (connectionData.TryGetComponent(lane, out ConnectionLane globalConn)
-					&& (globalConn.m_Flags & kVehicleConnectionFlags) != 0)
+					&& IsVehicleConnection(globalConn))
 				{
 					return true;
 				}
@@ -1697,6 +2368,36 @@ namespace AccessAnarchy.Systems
 		}
 
 		/// <summary>
+		/// v0.8.6：这条带 <see cref="ConnectionLane"/> 的车道是不是**车走的**。两种模式的范围判定、
+		/// chunk 快判、以及审计的"车辆持有者"分类全部走这一处，不要再各自比较 <see cref="kVehicleConnectionFlags"/>。
+		/// <list type="bullet">
+		/// <item>Road / Track / Parking 任一位 → 车行（原版 VehicleUtils.cs:491-503 同一组位）。</item>
+		/// <item>只有 <c>Inside|AllowCargo</c> → 也是车行：`RouteConnectionType.Cargo` 的连道就打这两个位
+		/// （RoadConnectionSystem.cs:1354），仓库/商超的货台、装卸口走的就是它。判据与原版同一份：
+		/// <c>Pathfind/LaneDataSystem.cs:360-408</c> 给连道定访问限制时就是按
+		/// <c>Pedestrian → Road → Parking → AllowCargo → Track</c> 这个顺序判的，其中 AllowCargo 那一支
+		/// 打的是 <c>RestrictedCar</c>（:393-401）——原版认它是车行道。⚠ 这一位不能只靠"看车道类型组件"
+		/// 兜住：五种 connection type 共用同一个连道 prefab（<c>m_ConnectionPrefabs[0]</c>，:1330 取 archetype，
+		/// :1432-1443 创建后只按 <c>Parking</c> 位补 <c>GarageLane</c>），行人连道与车行连道走的是同一条生成路径，
+		/// 能区分人车的只有 flags——所以"先看 CarLane/ParkingLane/GarageLane/AreaLane 组件、后看连道位"的
+		/// 那套兜底要么接不到它、要么会把行人连道一起接进来。v0.8.5 只补了组件兜底，货台这一类仍然漏。</item>
+		/// <item>⚠ 但必须再排除 <c>Pedestrian</c> 位：室外行人连道打的正是
+		/// <c>Pedestrian|AllowMiddle|AllowCargo</c>（OutsideConnectionSystem.cs:622），
+		/// 只认 AllowCargo 会把一条人行道当车行道处理（删它自己的条目没效果，还会把它放进入口模式的锚点来源池，
+		/// 正是 v0.8.4 那次"锚点被行人道灌满"的同一族错误）。</item>
+		/// </list>
+		/// </summary>
+		private static bool IsVehicleConnection(ConnectionLane conn)
+		{
+			if ((conn.m_Flags & kVehicleConnectionFlags) != 0)
+			{
+				return true;
+			}
+			return (conn.m_Flags & ConnectionLaneFlags.AllowCargo) != 0
+				&& (conn.m_Flags & ConnectionLaneFlags.Pedestrian) == 0;
+		}
+
+		/// <summary>
 		/// v0.8.3 统一判据 + v0.8.4 只认车行 + v0.8.5 货运连道回到组件判定：这条车道属不属于
 		/// "出入口与建筑内部道路"这一整片。
 		/// 命中任一条即是：① GarageLane（车库/坡道）；② **带车行位**的 ConnectionLane（建筑、停车场与
@@ -1712,7 +2413,8 @@ namespace AccessAnarchy.Systems
 		/// CarLane / ParkingLane / PedestrianLane / NavalLane 之一，Area/Connection/Track/Garage 是形状位），
 		/// 所以"有 ConnectionLane 就是出入口"把整条街的行人连道都当成了车辆出入口——作者实机
 		/// `Anchor sources: access=106283 parking=4823` 就是这件事的读数（11 万 vs 4.8 千）。
-		/// 判"是不是车走的"用官方同一组位：<see cref="kVehicleConnectionFlags"/>，与全局模式 v0.5 起的写法一致。
+		/// 判"是不是车走的"用官方同一组位：<see cref="IsVehicleConnection"/>（v0.8.6 起含 AllowCargo），
+		/// 两条模式共用同一个判据，不再各写一份。
 		///
 		/// 为什么不再分"停车场 / 建筑出入口 / 建筑内部道路"（两轮实机 + 作者 2026-10-01 决定，
 		/// 证据全文在开发笔记 §⑨2 与 §⑪）：
@@ -1737,18 +2439,14 @@ namespace AccessAnarchy.Systems
 				return false;
 			}
 			if (connectionData.TryGetComponent(lane, out ConnectionLane accessConn)
-				&& (accessConn.m_Flags & kVehicleConnectionFlags) != 0)
+				&& IsVehicleConnection(accessConn))
 			{
 				return true;
 			}
-			// v0.8.5：连道但**没有**那三位之一，不能就此判定"不是出入口"。
-			// `RouteConnectionType.Cargo` 的建筑连道只打 `Inside|AllowCargo`
-			// （RoadConnectionSystem.cs:1354，仓库/商超的装卸口、货台那一类），
-			// 原来这里直接 `return false` 把整类货运用途的车行连道挡在出入口模式之外；
-			// 而全局模式是先看 CarLane/ParkingLane/GarageLane/AreaLane 组件、**后**才看连道位
-			// （见 IsInNoYieldScope 的 global 分支），同一批车道在两条模式下给出不同答案——
-			// "有些停车场/仓库生效、有些不生效"正好是这个形状。落到下面的组件判定即可：
-			// 纯行人连道已经在第一句被 PedestrianLane 挡掉，不会因此混进来。
+			// v0.8.5：连道但**没有**车行判据，不能就此判定"不是出入口"。
+			// v0.8.6 起 `IsVehicleConnection` 已经把 `Inside|AllowCargo` 那一类接回来了，
+			// 这里剩下的兜底服务的是"带车库/区域形状位或归建筑自有的车辆车道"：
+			// 连道之外还带 ①③④ 任一的仍由后面几条接住。
 			if (garageData.HasComponent(lane) || areaData.HasComponent(lane))
 			{
 				return true;
@@ -1762,9 +2460,12 @@ namespace AccessAnarchy.Systems
 		}
 
 		/// <summary>全局模式的 chunk 级快速类型判定：任何车辆车道（CarLane/ParkingLane/GarageLane/AreaLane，
-		/// 以及带 Road/Track/Parking  flags 的 ConnectionLane）一律在范围内。
+		/// 以及 <see cref="IsVehicleConnection"/> 认可的建筑连道）一律在范围内。
 		/// 出入口模式不走这里——那份判定要逐条车道看组件、邻域集合与锚点距离，
-		/// 统一在 <see cref="IsInNoYieldScope"/> 里（需要逐车道的 ComponentLookup，没法用 chunk flag 代替）。</summary>
+		/// 统一在 <see cref="IsInNoYieldScope"/> 里（需要逐车道的 ComponentLookup，没法用 chunk flag 代替）。
+		/// ⚠ 这里与 <see cref="IsInNoYieldScope"/> 的全局分支必须给出同一个答案：那条分支先看的也是这四位组件，
+		/// 差别只在本函数按 chunk 的组件存在性判（同一 archetype 内所有实体一致），所以连道位必须逐条读
+		/// （<paramref name="connectionArray"/>[i]），不能只看"这个 chunk 有没有 ConnectionLane"。</summary>
 		private static bool IsGlobalLaneByChunk(bool chunkHasCarLane, bool chunkHasParking, bool chunkHasGarage,
 			bool chunkHasConnection, bool chunkHasArea, NativeArray<ConnectionLane> connectionArray, int i)
 		{
@@ -1772,7 +2473,7 @@ namespace AccessAnarchy.Systems
 			{
 				return true;
 			}
-			if (chunkHasConnection && (connectionArray[i].m_Flags & (ConnectionLaneFlags.Road | ConnectionLaneFlags.Track | ConnectionLaneFlags.Parking)) != 0)
+			if (chunkHasConnection && IsVehicleConnection(connectionArray[i]))
 			{
 				return true;
 			}
@@ -1801,9 +2502,9 @@ namespace AccessAnarchy.Systems
 		}
 
 		/// <summary>overlap 条目指向的是否为"行人道"。
-		/// includeCrosswalks == 0 时人行横道（Crosswalk flag）算"不是行人道"，即条目保留：
-		/// 出入口模式下这是 v0.5 的横道误伤修复（横道天然紧邻出入口）；
-		/// 全局模式传 1 —— "全部道路"就要连横道也不让，见 v0.7.7。</summary>
+		/// includeCrosswalks == 0 时人行横道（Crosswalk flag）算"不是行人道"，即条目保留；
+		/// == 1 时横道条目一起删。<b>这个 0/1 从 v0.8.6 起由 <see cref="CrosswalkScopeFor"/> 按持有者算，
+		/// 不要再由调用方按模式写死。</b></summary>
 		private static bool IsPedestrianLaneEntity(Entity other, ComponentLookup<PedestrianLane> pedestrianLaneData,
 			ComponentLookup<ConnectionLane> connectionLaneData, int includeCrosswalks)
 		{
@@ -1822,6 +2523,69 @@ namespace AccessAnarchy.Systems
 				return true;
 			}
 			return false;
+		}
+
+		/// <summary>
+		/// v0.8.6：指向人行横道的条目删不删，改由**持有者**这条车道决定，不再由模式一刀切。
+		/// 全局模式一律删（v0.7.7 口径不变）；出入口模式只有持有者自己是"资产内部的车行道"
+		/// （<see cref="IsFacilityCrosswalkHolder"/>）时才删横道条目，靠"邻域集合成员 / 曲线 32 米内有锚点"
+		/// 进范围的普通市政道路与路口车道一律保留——作者 2026-10-06：
+		/// 「（建筑内部道路或资产门口的横道）要删也可以的，不要影响道路上的横道就行」。
+		/// v0.5 那次横道误伤的根因是"邻近兜底跨类"（出入口旁边的马路横道会被 32 米判进范围），
+		/// 当时唯一的办法就是一刀切不删横道；现在按持有者分类就能两头都要到：
+		/// 挂在车库道/场区道/建筑连道上的那条门口横道删掉，挂在市政 CarLane 上的路口横道不动。
+		/// ⚠ 按**每条车道**算一次；同一条车道的"有没有行人条目"与"回写保留项"必须用同一个值，
+		/// 否则会出现计数说有、回写时又判成保留的空写（ECB 白占一格命令缓冲）。
+		/// </summary>
+		private static int CrosswalkScopeFor(Entity holder, int mode,
+			ComponentLookup<PedestrianLane> pedestrianData, ComponentLookup<GarageLane> garageData,
+			ComponentLookup<ConnectionLane> connectionData, ComponentLookup<AreaLane> areaData,
+			ComponentLookup<CarLane> carData, ComponentLookup<ParkingLane> parkingData,
+			ComponentLookup<Owner> ownerData, ComponentLookup<Edge> edgeData, ComponentLookup<Node> nodeData)
+		{
+			if (mode == Setting.kModeGlobal)
+			{
+				return 1;
+			}
+			return IsFacilityCrosswalkHolder(holder, pedestrianData, garageData, connectionData, areaData, carData,
+				parkingData, ownerData, edgeData, nodeData) ? 1 : 0;
+		}
+
+		/// <summary>
+		/// v0.8.6：**比 <see cref="IsAccessOrFacilityLane"/> 更窄**的一档判据，只用来决定"这条车道上的
+		/// 横道条目能不能删"。差别在连道那一支：必须带 `Inside`。
+		/// 全库 `ConnectionLaneFlags.Inside` 只有一个写入点——`RoadConnectionSystem.cs:1336`
+		/// （建筑连道的公共前缀，之后才按 connection type 叠加 Road/Track/Parking/AllowCargo/Pedestrian），
+		/// 所以"带 Inside 的连道"＝"某栋建筑/某个设施自己那条大门道"，可以精确等同于玩家理解的"资产门口"。
+		/// 不带 Inside 的连道都是**路网的一部分**，最典型是图边连接道
+		/// （`OutsideConnectionSystem.cs:603,611,615` 的 `Start|Outside|Road|AllowMiddle`）：
+		/// 它们同样命中 `IsVehicleConnection` 的第一支而进入删除范围（v0.8.4 起一直如此，是对的——
+		/// 那些道上确实会有货车穿行），但它们是市政道路，**不能让它们把路口横道的避让一起带走**。
+		/// 另外 `LaneConnectionSystem.cs:718-724/773-778` 说明 `Pedestrian` 与 `Road` 会被同时打上
+		/// （自行车连道），所以这里也不能靠"命中车行位就一定是设施"来推。
+		/// 其余三支与 IsAccessOrFacilityLane 相同：GarageLane、AreaLane、建筑自有的 CarLane/ParkingLane。
+		/// </summary>
+		private static bool IsFacilityCrosswalkHolder(Entity lane,
+			ComponentLookup<PedestrianLane> pedestrianData, ComponentLookup<GarageLane> garageData,
+			ComponentLookup<ConnectionLane> connectionData, ComponentLookup<AreaLane> areaData,
+			ComponentLookup<CarLane> carData, ComponentLookup<ParkingLane> parkingData,
+			ComponentLookup<Owner> ownerData, ComponentLookup<Edge> edgeData, ComponentLookup<Node> nodeData)
+		{
+			if (pedestrianData.HasComponent(lane))
+			{
+				return false;
+			}
+			if (garageData.HasComponent(lane) || areaData.HasComponent(lane))
+			{
+				return true;
+			}
+			if (connectionData.TryGetComponent(lane, out ConnectionLane conn)
+				&& (conn.m_Flags & ConnectionLaneFlags.Inside) != 0 && IsVehicleConnection(conn))
+			{
+				return true;
+			}
+			return (carData.HasComponent(lane) || parkingData.HasComponent(lane))
+				&& IsBuildingOwned(lane, ownerData, edgeData, nodeData);
 		}
 
 		/// <summary>关闭功能兜底路径：给拥有者实体（带 SubLane 缓冲的 edge/node/building）打 Updated 脏标记，
@@ -2179,9 +2943,9 @@ namespace AccessAnarchy.Systems
 			[ReadOnly]
 			public NativeHashSet<Entity> m_AccessVehicleSet;
 
+			// v0.8.6：这里原来有 `m_IncludeCrosswalks`（按模式写死的 0/1），已删——
+			// 横道条目改由 StripTarget 逐条车道调 CrosswalkScopeFor 决定，m_Mode 就是它的输入。
 			public int m_Mode;
-
-			public int m_IncludeCrosswalks;
 
 			public EntityCommandBuffer.ParallelWriter m_Ecb;
 
@@ -2273,10 +3037,15 @@ namespace AccessAnarchy.Systems
 				{
 					return;
 				}
+				// v0.8.6：横道条目按持有者分类（出入口/内部道删、邻域兜底进来的市政道路不删），
+				// 一次算出来供"计数"和"回写"两段共用，别在两处各调一次。
+				int includeCrosswalks = CrosswalkScopeFor(lane, m_Mode,
+					m_PedestrianLaneData, m_GarageLaneData, m_ConnectionLaneData, m_AreaLaneData, m_CarLaneData,
+					m_ParkingLaneData, m_OwnerData, m_EdgeData, m_NodeData);
 				int pedestrian = 0;
 				for (int j = 0; j < buffer.Length; j++)
 				{
-					if (IsPedestrianLaneEntity(buffer[j].m_Other, m_PedestrianLaneData, m_ConnectionLaneData, m_IncludeCrosswalks))
+					if (IsPedestrianLaneEntity(buffer[j].m_Other, m_PedestrianLaneData, m_ConnectionLaneData, includeCrosswalks))
 					{
 						pedestrian++;
 					}
@@ -2290,7 +3059,7 @@ namespace AccessAnarchy.Systems
 				DynamicBuffer<LaneOverlap> replacement = m_Ecb.SetBuffer<LaneOverlap>(sortKey, lane);
 				for (int j = 0; j < buffer.Length; j++)
 				{
-					if (!IsPedestrianLaneEntity(buffer[j].m_Other, m_PedestrianLaneData, m_ConnectionLaneData, m_IncludeCrosswalks))
+					if (!IsPedestrianLaneEntity(buffer[j].m_Other, m_PedestrianLaneData, m_ConnectionLaneData, includeCrosswalks))
 					{
 						replacement.Add(buffer[j]);
 					}
@@ -2300,8 +3069,9 @@ namespace AccessAnarchy.Systems
 			}
 		}
 
-		/// <summary>心跳自证用：统计邻域集合内的车辆车道当前还残留多少条行人 overlap 条目。
-		/// 出入口模式恒传 includeCrosswalks=0（横道条目我们本来就不动，算进去会永远非 0）。</summary>
+		/// <summary>心跳自证用：统计邻域集合内的车辆车道当前还残留多少条**本应被本模组删掉**的行人
+		/// overlap 条目。v0.8.6 起与剥离侧同一口径（<see cref="CrosswalkScopeFor"/> 按持有者判横道），
+		/// 所以"0 = 干净"仍然等价于"该删的都删了"，不会把按设计保留的马路横道条目算成漏口。</summary>
 		[BurstCompile]
 		private struct AuditAccessSetJob : IJob
 		{
@@ -2317,6 +3087,29 @@ namespace AccessAnarchy.Systems
 			[ReadOnly]
 			public ComponentLookup<ConnectionLane> m_ConnectionLaneData;
 
+			[ReadOnly]
+			public ComponentLookup<GarageLane> m_GarageLaneData;
+
+			[ReadOnly]
+			public ComponentLookup<AreaLane> m_AreaLaneData;
+
+			[ReadOnly]
+			public ComponentLookup<CarLane> m_CarLaneData;
+
+			[ReadOnly]
+			public ComponentLookup<ParkingLane> m_ParkingLaneData;
+
+			[ReadOnly]
+			public ComponentLookup<Owner> m_OwnerData;
+
+			[ReadOnly]
+			public ComponentLookup<Edge> m_EdgeData;
+
+			[ReadOnly]
+			public ComponentLookup<Node> m_NodeData;
+
+			public int m_Mode;
+
 			public NativeArray<int> m_Counters;
 
 			public void Execute()
@@ -2327,10 +3120,13 @@ namespace AccessAnarchy.Systems
 					{
 						continue;
 					}
+					int includeCrosswalks = CrosswalkScopeFor(lane, m_Mode,
+						m_PedestrianLaneData, m_GarageLaneData, m_ConnectionLaneData, m_AreaLaneData, m_CarLaneData,
+						m_ParkingLaneData, m_OwnerData, m_EdgeData, m_NodeData);
 					int hit = 0;
 					for (int j = 0; j < buffer.Length; j++)
 					{
-						if (IsPedestrianLaneEntity(buffer[j].m_Other, m_PedestrianLaneData, m_ConnectionLaneData, 0))
+						if (IsPedestrianLaneEntity(buffer[j].m_Other, m_PedestrianLaneData, m_ConnectionLaneData, includeCrosswalks))
 						{
 							hit++;
 						}
@@ -2345,7 +3141,9 @@ namespace AccessAnarchy.Systems
 		}
 
 		/// <summary>access 模式干预点 A：只遍历邻域车辆集合，删除指向行人道的 overlap 条目。
-		/// 不再 ScheduleParallel 全城 m_OverlapQuery——那是 v0.7.0 性能重构后残留的 O(全城) 热点。</summary>
+		/// 不再 ScheduleParallel 全城 m_OverlapQuery——那是 v0.7.0 性能重构后残留的 O(全城) 热点。
+		/// v0.8.6：横道条目不再一律保留——集合里既有设施车道也有靠邻近兜底进来的市政道路，
+		/// 按持有者逐条判（<see cref="CrosswalkScopeFor"/>），与另外三处剥离点同一口径。</summary>
 		[BurstCompile]
 		private struct StripAccessOverlapsFromSetJob : IJob
 		{
@@ -2360,6 +3158,31 @@ namespace AccessAnarchy.Systems
 
 			[ReadOnly]
 			public ComponentLookup<ConnectionLane> m_ConnectionLaneData;
+
+			[ReadOnly]
+			public ComponentLookup<GarageLane> m_GarageLaneData;
+
+			[ReadOnly]
+			public ComponentLookup<AreaLane> m_AreaLaneData;
+
+			[ReadOnly]
+			public ComponentLookup<CarLane> m_CarLaneData;
+
+			[ReadOnly]
+			public ComponentLookup<ParkingLane> m_ParkingLaneData;
+
+			[ReadOnly]
+			public ComponentLookup<Owner> m_OwnerData;
+
+			[ReadOnly]
+			public ComponentLookup<Edge> m_EdgeData;
+
+			[ReadOnly]
+			public ComponentLookup<Node> m_NodeData;
+
+			/// <summary>本 job 只在出入口模式下排（调用方按 !globalMode 判断），值恒为 Setting.kModeAccessOnly；
+			/// 仍然显式传进来给 CrosswalkScopeFor 用，免得将来复用到全局路径时悄悄按"设施"过滤。</summary>
+			public int m_Mode;
 
 			public EntityCommandBuffer.ParallelWriter m_Ecb;
 
@@ -2379,15 +3202,18 @@ namespace AccessAnarchy.Systems
 					{
 						continue;
 					}
-					if (!HasPedestrianOverlap(buffer))
+					// 同一条车道的"判有没有"与"回写"共用这一个值。
+					int includeCrosswalks = CrosswalkScopeFor(lane, m_Mode,
+						m_PedestrianLaneData, m_GarageLaneData, m_ConnectionLaneData, m_AreaLaneData, m_CarLaneData,
+						m_ParkingLaneData, m_OwnerData, m_EdgeData, m_NodeData);
+					if (!HasPedestrianOverlap(buffer, includeCrosswalks))
 					{
 						continue;
 					}
 					DynamicBuffer<LaneOverlap> replacement = m_Ecb.SetBuffer<LaneOverlap>(sortKey++, lane);
 					for (int j = 0; j < buffer.Length; j++)
 					{
-						// 本 job 只在出入口模式跑：横道条目一律保留（v0.5 误伤修复）。
-						if (!IsPedestrianLaneEntity(buffer[j].m_Other, m_PedestrianLaneData, m_ConnectionLaneData, 0))
+						if (!IsPedestrianLaneEntity(buffer[j].m_Other, m_PedestrianLaneData, m_ConnectionLaneData, includeCrosswalks))
 						{
 							replacement.Add(buffer[j]);
 						}
@@ -2395,11 +3221,11 @@ namespace AccessAnarchy.Systems
 				}
 			}
 
-			private bool HasPedestrianOverlap(DynamicBuffer<LaneOverlap> buffer)
+			private bool HasPedestrianOverlap(DynamicBuffer<LaneOverlap> buffer, int includeCrosswalks)
 			{
 				for (int i = 0; i < buffer.Length; i++)
 				{
-					if (IsPedestrianLaneEntity(buffer[i].m_Other, m_PedestrianLaneData, m_ConnectionLaneData, 0))
+					if (IsPedestrianLaneEntity(buffer[i].m_Other, m_PedestrianLaneData, m_ConnectionLaneData, includeCrosswalks))
 					{
 						return true;
 					}
@@ -2410,9 +3236,12 @@ namespace AccessAnarchy.Systems
 
 		/// <summary>
 		/// 干预点 A：删除车辆车道 LaneOverlap 缓冲中指向行人道的条目。
-		/// 全局模式：所有车辆车道都删（含指向人行横道的条目，m_IncludeCrosswalks=1）。
-		/// access 模式：类型判定 / 邻域集合成员 / 锚点邻域三选一，横道条目一律保留。
-		/// 既用于世界加载后的首次全量（m_OverlapQuery），也用于每帧事件驱动重刷（m_RefreshQuery）。
+		/// 全局模式：所有车辆车道都删（含指向人行横道的条目）。
+		/// access 模式：类型判定 / 邻域集合成员 / 锚点邻域三选一进范围；横道条目只在
+		/// **持有者自己是出入口/建筑内部道路**时删（v0.8.6，见 <see cref="CrosswalkScopeFor"/>），
+		/// 靠邻域兜底进来的普通市政道路与路口车道的横道条目一律保留。
+		/// 既用于世界加载/切模式后的首次全量与 v0.8.7 的条件重剥（两者都跑 m_OverlapQuery 全城），
+		/// 也用于每帧事件驱动重刷（m_RefreshQuery）。
 		/// </summary>
 		[BurstCompile]
 		private struct StripPedestrianOverlapsJob : IJobChunk
@@ -2478,9 +3307,15 @@ namespace AccessAnarchy.Systems
 
 			public int m_Mode;
 
-			/// <summary>是否连人行横道（PedestrianLaneFlags.Crosswalk）的条目一起删：
-			/// 全局模式 = 1（"全部道路"含横道），出入口模式 = 0（保留 v0.5 的横道误伤修复）。</summary>
-			public int m_IncludeCrosswalks;
+			// v0.8.6：原来的 `m_IncludeCrosswalks`（全局 1 / 出入口 0）已删——横道条目改由
+			// Execute 逐条车道调 CrosswalkScopeFor，出入口模式下只有设施车道的横道条目会被删。
+
+			/// <summary>v0.8.7：全局重剥（首次全量与 sweep）专用诊断计数，每 chunk 两格
+			/// （SetBuffer 写入次数 / 删掉的行人条目数）。事件驱动重刷那一批不传（未创建）——
+			/// 那一批的量已经由 <see cref="StripRebuiltLanesJob.m_RepairCounters"/> 报在
+			/// `Rebuild gate` 行里，两个成因混在一个数上就没法判分了。</summary>
+			[NativeDisableParallelForRestriction]
+			public NativeArray<int> m_StripCounters;
 
 			public EntityCommandBuffer.ParallelWriter m_Ecb;
 
@@ -2533,26 +3368,40 @@ namespace AccessAnarchy.Systems
 						continue;
 					}
 					DynamicBuffer<LaneOverlap> buffer = overlaps[i];
-					if (!HasPedestrianOverlap(buffer))
+					// v0.8.6：横道条目按持有者分类，同一条车道的"判有没有"与"回写"共用这一个值。
+					int includeCrosswalks = CrosswalkScopeFor(lane, m_Mode,
+						m_PedestrianLaneData, m_GarageLaneData, m_ConnectionLaneData, m_AreaLaneData, m_CarLaneData,
+						m_ParkingLaneData, m_OwnerData, m_EdgeData, m_NodeData);
+					if (!HasPedestrianOverlap(buffer, includeCrosswalks))
 					{
 						continue;
 					}
 					DynamicBuffer<LaneOverlap> replacement = m_Ecb.SetBuffer<LaneOverlap>(m_SortKeyBase + unfilteredChunkIndex, lane);
+					int kept = 0;
 					for (int j = 0; j < buffer.Length; j++)
 					{
-						if (!IsPedestrianLaneEntity(buffer[j].m_Other, m_PedestrianLaneData, m_ConnectionLaneData, m_IncludeCrosswalks))
+						if (!IsPedestrianLaneEntity(buffer[j].m_Other, m_PedestrianLaneData, m_ConnectionLaneData, includeCrosswalks))
 						{
 							replacement.Add(buffer[j]);
+							kept++;
 						}
+					}
+					// v0.8.7：只有全城重剥那一批传了计数数组（事件重刷传的是未创建默认值）。
+					// 槽位与 StripRebuiltLanesJob 同构：unfilteredChunkIndex 独占两格，无跨线程争用。
+					if (m_StripCounters.IsCreated)
+					{
+						int slot = unfilteredChunkIndex * 2;
+						m_StripCounters[slot]++;
+						m_StripCounters[slot + 1] += buffer.Length - kept;
 					}
 				}
 			}
 
-			private bool HasPedestrianOverlap(DynamicBuffer<LaneOverlap> buffer)
+			private bool HasPedestrianOverlap(DynamicBuffer<LaneOverlap> buffer, int includeCrosswalks)
 			{
 				for (int i = 0; i < buffer.Length; i++)
 				{
-					if (IsPedestrianLaneEntity(buffer[i].m_Other, m_PedestrianLaneData, m_ConnectionLaneData, m_IncludeCrosswalks))
+					if (IsPedestrianLaneEntity(buffer[i].m_Other, m_PedestrianLaneData, m_ConnectionLaneData, includeCrosswalks))
 					{
 						return true;
 					}
@@ -2561,16 +3410,47 @@ namespace AccessAnarchy.Systems
 			}
 		}
 
-		/// <summary>关闭恢复自检（v0.7.6，诊断用）：统计 m_OverlapQuery 匹配的车辆车道里仍有几条
-		/// 指向行人道的 LaneOverlap 条目，并单列其中指向人行横道的那部分（v0.7.7 起全局模式
-		/// 连横道条目也删，所以"横道条目回来了"才是原版真正恢复的证据）。
+		/// <summary>
+		/// 全城扫一遍车辆车道的 LaneOverlap，统计指向行人道的条目数，并按持有者分类（v0.8.6）。
+		/// 前两格沿用 v0.7.7 起的"原版重建有没有发生过"口径——审计要的是事实而不是我们删了什么，
+		/// 所以这里横道条目一律计入（includeCrosswalks=1）：全局模式连横道都删，只数非横道会误判。
+		/// 新增的 4~9 号把同一批条目按**持有者是谁**再切一刀：
+		/// "车辆持有者"= 全局模式会剥的那批（<see cref="IsGlobalLaneByChunk"/> 且不带 PedestrianLane），
+		/// "路网持有者"= 其中 Owner 是 edge/node 的，也就是市政道路与**路口**车道。
+		/// 玩家评论"it doesn't seem to work for all intersections"要的读数就在这里：
+		/// roadEntries == 0 而车仍然停在路口 ⇒ 不是 LaneOverlap 这条通道，见 ReportRebuildDiagnostics。
 		/// 每块写 kAuditCountersPerChunk 个 int 避免原子争用，主线程求和。
-		/// 总数 &gt; 0 = 原版重建已把行人条目写回；== 0 = 仍处于被剥离状态。</summary>
+		/// v0.8.7 再加 <see cref="m_Samples"/>：真数到"该剥却没剥干净"的车辆车道时，就地采最多
+		/// <see cref="kAuditSampleCount"/> 条样本（持有者与对端的实体号、双方类型位/flags、持有者曲线中点
+		/// 坐标）。作者报"就这一边的人行横道没生效"时，光有计数定位不到是哪条车道，下一轮实机还得靠肉眼再猜；
+		/// 有了这三条样本，日志能直接说出漏的是哪一类持有者、指向哪一种对端。
+		/// </summary>
 		[BurstCompile]
 		private struct AuditPedestrianOverlapsJob : IJobChunk
 		{
 			[ReadOnly]
+			public EntityTypeHandle m_EntityType;
+
+			[ReadOnly]
 			public BufferTypeHandle<LaneOverlap> m_OverlapType;
+
+			[ReadOnly]
+			public ComponentTypeHandle<CarLane> m_CarLaneType;
+
+			[ReadOnly]
+			public ComponentTypeHandle<ParkingLane> m_ParkingLaneType;
+
+			[ReadOnly]
+			public ComponentTypeHandle<GarageLane> m_GarageLaneType;
+
+			[ReadOnly]
+			public ComponentTypeHandle<ConnectionLane> m_ConnectionLaneType;
+
+			[ReadOnly]
+			public ComponentTypeHandle<AreaLane> m_AreaLaneType;
+
+			[ReadOnly]
+			public ComponentTypeHandle<PedestrianLane> m_PedestrianLaneType;
 
 			[ReadOnly]
 			public ComponentLookup<PedestrianLane> m_PedestrianLaneData;
@@ -2578,21 +3458,109 @@ namespace AccessAnarchy.Systems
 			[ReadOnly]
 			public ComponentLookup<ConnectionLane> m_ConnectionLaneData;
 
+			[ReadOnly]
+			public ComponentLookup<Owner> m_OwnerData;
+
+			[ReadOnly]
+			public ComponentLookup<Edge> m_EdgeData;
+
+			[ReadOnly]
+			public ComponentLookup<Node> m_NodeData;
+
+			/// <summary>v0.8.7：样本里要带持有者的曲线中点，作者才能在游戏里走到那个路口去看。
+			/// 只在采样本这一支用，所以没样本可采时它一次都不读。</summary>
+			[ReadOnly]
+			public ComponentLookup<Curve> m_CurveData;
+
 			[NativeDisableParallelForRestriction]
 			public NativeArray<int> m_Counters;
 
+			/// <summary>v0.8.7：残留条目样本，**每 chunk 一格**（宽度 <see cref="kAuditSamplePerChunk"/>，
+			/// 布局见该常量）。只在"持有者是车辆车道却还留着行人条目"时写第一条；槽位由
+			/// <c>unfilteredChunkIndex</c> 独占 ⇒ 无跨线程争用、不会把两条车道的字段混成一条样本。</summary>
+			[NativeDisableParallelForRestriction]
+			public NativeArray<int> m_Samples;
+
+			/// <summary>样本类型位（<see cref="m_Samples"/> 里第 5 格）。</summary>
+			private const int kSampleBitCar = 1;
+			private const int kSampleBitParking = 2;
+			private const int kSampleBitGarage = 4;
+			private const int kSampleBitConnection = 8;
+			private const int kSampleBitArea = 16;
+			private const int kSampleBitPedestrian = 32;
+			private const int kSampleBitBuildingOwned = 64;
+
+			private void AddSample(int chunkSlot, Entity holder, Entity target, int holderBits, int pedFlags, int connFlags, float3 mid, int hit)
+			{
+				if (!m_Samples.IsCreated)
+				{
+					return;
+				}
+				// 每 chunk 只留第一条：槽位是本 chunk 独占的，所以既不用原子也不需要重试；
+				// 调用点已经保证"本 chunk 还没写过"（见 Execute 里的 chunkSampled）。
+				int b = chunkSlot * kAuditSamplePerChunk;
+				m_Samples[b] = hit;
+				m_Samples[b + 1] = holder.Index;
+				m_Samples[b + 2] = holder.Version;
+				m_Samples[b + 3] = target.Index;
+				m_Samples[b + 4] = target.Version;
+				m_Samples[b + 5] = holderBits;
+				m_Samples[b + 6] = pedFlags;
+				m_Samples[b + 7] = connFlags;
+				m_Samples[b + 8] = (int)math.round(mid.x);
+				m_Samples[b + 9] = (int)math.round(mid.z);
+			}
+
 			public void Execute(in ArchetypeChunk chunk, int unfilteredChunkIndex, bool useEnabledMask, in v128 chunkEnabledMask)
 			{
+				bool chunkHasCarLane = chunk.Has(ref m_CarLaneType);
+				bool chunkHasParking = chunk.Has(ref m_ParkingLaneType);
+				bool chunkHasGarage = chunk.Has(ref m_GarageLaneType);
+				bool chunkHasConnection = chunk.Has(ref m_ConnectionLaneType);
+				bool chunkHasArea = chunk.Has(ref m_AreaLaneType);
+				bool chunkHasPedestrian = chunk.Has(ref m_PedestrianLaneType);
 				BufferAccessor<LaneOverlap> overlaps = chunk.GetBufferAccessor(ref m_OverlapType);
+				NativeArray<Entity> entities = chunk.GetNativeArray(m_EntityType);
+				NativeArray<ConnectionLane> connectionArray = chunkHasConnection ? chunk.GetNativeArray(ref m_ConnectionLaneType) : default;
+				// 类型位是 chunk 级的（同一 archetype 内所有实体一致），一次算好给样本用。
+				int holderBits = (chunkHasCarLane ? kSampleBitCar : 0)
+					| (chunkHasParking ? kSampleBitParking : 0)
+					| (chunkHasGarage ? kSampleBitGarage : 0)
+					| (chunkHasConnection ? kSampleBitConnection : 0)
+					| (chunkHasArea ? kSampleBitArea : 0)
+					| (chunkHasPedestrian ? kSampleBitPedestrian : 0);
 				int lanes = 0;
 				int entries = 0;
 				int crosswalkLanes = 0;
 				int crosswalkEntries = 0;
+				bool chunkSampled = false;
+				int vehicleLanes = 0;
+				int vehicleEntries = 0;
+				int roadLanes = 0;
+				int roadEntries = 0;
+				int vehicleScanned = 0;
+				int roadScanned = 0;
 				for (int i = 0; i < chunk.Count; i++)
 				{
+					Entity lane = entities[i];
+					// 与剥离侧同口径：先认"这是不是一条全局模式会剥的车辆车道"，再分路网/设施。
+					bool holderIsVehicle = !chunkHasPedestrian
+						&& IsGlobalLaneByChunk(chunkHasCarLane, chunkHasParking, chunkHasGarage,
+							chunkHasConnection, chunkHasArea, connectionArray, i);
+					bool roadHolder = holderIsVehicle
+						&& !IsBuildingOwned(lane, m_OwnerData, m_EdgeData, m_NodeData);
+					if (holderIsVehicle)
+					{
+						vehicleScanned++;
+						if (roadHolder)
+						{
+							roadScanned++;
+						}
+					}
 					DynamicBuffer<LaneOverlap> buffer = overlaps[i];
 					int hit = 0;
 					int crosswalkHit = 0;
+					Entity firstPedTarget = Entity.Null;
 					for (int j = 0; j < buffer.Length; j++)
 					{
 						// 审计要的是"原版重建有没有发生过"，所以横道条目也计入（includeCrosswalks=1）：
@@ -2600,6 +3568,10 @@ namespace AccessAnarchy.Systems
 						if (IsPedestrianLaneEntity(buffer[j].m_Other, m_PedestrianLaneData, m_ConnectionLaneData, 1))
 						{
 							hit++;
+							if (firstPedTarget == Entity.Null)
+							{
+								firstPedTarget = buffer[j].m_Other;
+							}
 							if (IsCrosswalkLane(buffer[j].m_Other, m_PedestrianLaneData))
 							{
 								crosswalkHit++;
@@ -2610,6 +3582,31 @@ namespace AccessAnarchy.Systems
 					{
 						lanes++;
 						entries += hit;
+						if (holderIsVehicle)
+						{
+							vehicleLanes++;
+							vehicleEntries += hit;
+							if (roadHolder)
+							{
+								roadLanes++;
+								roadEntries += hit;
+							}
+							// v0.8.7：车辆持有者还留着行人条目 = 这一条就是"该剥没剥干净"的现场，采样本。
+							// 路网与设施两类都要采（作者报的两种形状一边是路口横道、一边是设施出入口，
+							// 只采其中一类就又回到"靠肉眼猜"）；每 chunk 只留第一条，槽位本块独占。
+							if (m_Samples.IsCreated && !chunkSampled)
+							{
+								int sampleBits = holderBits | (roadHolder ? 0 : kSampleBitBuildingOwned);
+								int pedFlags = m_PedestrianLaneData.TryGetComponent(firstPedTarget, out PedestrianLane samplePed)
+									? (int)samplePed.m_Flags : 0;
+								int connFlags = m_ConnectionLaneData.TryGetComponent(firstPedTarget, out ConnectionLane sampleConn)
+									? (int)sampleConn.m_Flags : 0;
+								float3 mid = m_CurveData.TryGetComponent(lane, out Curve sampleCurve)
+									? MathUtils.Position(sampleCurve.m_Bezier, 0.5f) : float3.zero;
+								AddSample(unfilteredChunkIndex, lane, firstPedTarget, sampleBits, pedFlags, connFlags, mid, hit);
+								chunkSampled = true;
+							}
+						}
 					}
 					if (crosswalkHit > 0)
 					{
@@ -2618,10 +3615,16 @@ namespace AccessAnarchy.Systems
 					}
 				}
 				int baseIndex = unfilteredChunkIndex * kAuditCountersPerChunk;
-				m_Counters[baseIndex] = lanes;
-				m_Counters[baseIndex + 1] = entries;
-				m_Counters[baseIndex + 2] = crosswalkLanes;
-				m_Counters[baseIndex + 3] = crosswalkEntries;
+				m_Counters[baseIndex + kAuditLanes] = lanes;
+				m_Counters[baseIndex + kAuditEntries] = entries;
+				m_Counters[baseIndex + kAuditCrosswalkLanes] = crosswalkLanes;
+				m_Counters[baseIndex + kAuditCrosswalkEntries] = crosswalkEntries;
+				m_Counters[baseIndex + kAuditVehicleLanes] = vehicleLanes;
+				m_Counters[baseIndex + kAuditVehicleEntries] = vehicleEntries;
+				m_Counters[baseIndex + kAuditRoadLanes] = roadLanes;
+				m_Counters[baseIndex + kAuditRoadEntries] = roadEntries;
+				m_Counters[baseIndex + kAuditVehicleScanned] = vehicleScanned;
+				m_Counters[baseIndex + kAuditRoadScanned] = roadScanned;
 			}
 		}
 	}

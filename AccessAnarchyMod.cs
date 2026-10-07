@@ -23,7 +23,7 @@ namespace AccessAnarchy
 
 		public void OnLoad(UpdateSystem updateSystem)
 		{
-			log.Info($"Access Anarchy v{ModInfo.kVersion} loading (native-crash hardening: own job chain instead of Dependency, world caches reset on preload; scope merged into one switch; performance: anchors collected from vehicle lanes only, access-zone rebuild only when something changed, idle steps leave before touching the barrier; correctness: rebuilt pedestrian lanes re-strip the vehicle lane paired with them, cargo connections back inside the access-zone scope)...");
+			log.Info($"Access Anarchy v{ModInfo.kVersion} loading (native-crash hardening: own job chain instead of Dependency, world caches reset on preload; scope merged into one switch; performance: anchors collected from vehicle lanes only, access-zone rebuild only when something changed, idle steps leave before touching the barrier, global re-strip throttled to one pass per change; correctness: rebuilt pedestrian lanes re-strip the vehicle lane paired with them, cargo connections counted as vehicle lanes in both modes, crosswalk entries decided per lane ownership, global mode now re-applies after paused windows where the game rebuilt overlaps while we were not stepping; copy: the road speed-limit warning is gone from all 12 toggle descriptions because that failure is vanilla kinematics, not this mod; v0.8.9 churn gate: entity-count wobble no longer drives whole-city re-strip or access-zone rounds)...");
 			if (GameManager.instance.modManager.TryGetExecutableAsset(this, out var asset))
 			{
 				log.Info($"Current mod asset at {asset.path}");

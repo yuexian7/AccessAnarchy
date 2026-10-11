@@ -1,3 +1,4 @@
+using System;
 using Colossal.Logging;
 using Game;
 using Game.Input;
@@ -21,6 +22,16 @@ namespace AccessAnarchy
 
 		private Setting m_Setting;
 
+		/// <summary>v0.8.10：注册进本地化管理器的 12 个源。
+		///
+		/// 必须**存下来并在 OnDispose 里还回去**：反编译 Colossal.Localization.dll 核实
+		/// `LocalizationManager.AddSource` 是 `m_UserSources` 的 `List.Add`，去重靠
+		/// `Contains((localeId, source))`——每次 OnLoad 都是 new 出来的**新对象**，必然入列；
+		/// 而 `RemoveSource` 存在、官方模板也没调它（模板同样会在"关掉再打开"时累积）。
+		/// 后果是每次开关一轮就多 12 份旧翻译源挂在游戏里（每份还攥着一整套旧的 Setting），
+		/// 按开关次数线性增长。官方模板是普遍缺陷，这里按卸载安全优先的原则做得更严。</summary>
+		private (string locale, LocaleSource source)[] m_LocaleSources;
+
 		public void OnLoad(UpdateSystem updateSystem)
 		{
 			log.Info($"Access Anarchy v{ModInfo.kVersion} loading (native-crash hardening: own job chain instead of Dependency, world caches reset on preload; scope merged into one switch; performance: anchors collected from vehicle lanes only, access-zone rebuild only when something changed, idle steps leave before touching the barrier, global re-strip throttled to one pass per change; correctness: rebuilt pedestrian lanes re-strip the vehicle lane paired with them, cargo connections counted as vehicle lanes in both modes, crosswalk entries decided per lane ownership, global mode now re-applies after paused windows where the game rebuilt overlaps while we were not stepping; copy: the road speed-limit warning is gone from all 12 toggle descriptions because that failure is vanilla kinematics, not this mod; v0.8.9 churn gate: entity-count wobble no longer drives whole-city re-strip or access-zone rounds)...");
@@ -34,11 +45,25 @@ namespace AccessAnarchy
 			m_Setting.RegisterInOptionsUI();
 
 			// 官方 12 种语言全部注册（语言代码与游戏 GetSupportedLocales() 一致）。
-			LocaleTable.SetActiveLocale(GameManager.instance.localizationManager.activeLocaleId);
-			string[] locales = LocaleTable.Locales;
-			for (int i = 0; i < locales.Length; i++)
+			// v0.8.10：GameManager/localizationManager 一律判空（这是本项目第三处"取游戏单例"的地方，
+			// 另外两处 ReportKeyBindings / OnDispose 早就做了防护）；源对象存下来供 OnDispose 归还。
+			// 类型写全名而不是加 using：避免与 Game.UI.Localization 下的同名类产生歧义。
+			Colossal.Localization.LocalizationManager localization = GameManager.instance?.localizationManager;
+			if (localization == null)
 			{
-				GameManager.instance.localizationManager.AddSource(locales[i], new LocaleSource(m_Setting, locales[i]));
+				log.Warn("Localization manager not available yet - options page labels fall back to the game defaults; this does not affect gameplay.");
+			}
+			else
+			{
+				LocaleTable.SetActiveLocale(localization.activeLocaleId);
+				string[] locales = LocaleTable.Locales;
+				m_LocaleSources = new (string, LocaleSource)[locales.Length];
+				for (int i = 0; i < locales.Length; i++)
+				{
+					LocaleSource source = new LocaleSource(m_Setting, locales[i]);
+					m_LocaleSources[i] = (locales[i], source);
+					localization.AddSource(locales[i], source);
+				}
 			}
 
 			// 注册快捷键（出厂默认留空，玩家在「快捷键设置」板块里自己按）。官方路线：
@@ -127,6 +152,10 @@ namespace AccessAnarchy
 			{
 				UnsubscribeHotkey(Setting.kToggleEnabledAction, OnToggleEnabledInteraction);
 				UnsubscribeHotkey(Setting.kToggleScopeAction, OnToggleScopeInteraction);
+				// v0.8.10：把 12 个本地化源还回去（见字段注释：不还就在每次"关掉再打开"后
+				// 永久挂在游戏里，并攥着上一轮的 Setting）。整段吞异常：这里失败不该
+				// 阻止后面的状态复位——那会让"关掉模组"留下更糟的状态。
+				RemoveLocaleSources();
 				// 卸载安全（v0.8.5）：这一句原来裸着。`UnregisterInOptionsUI` 抛异常时
 				// `m_Setting = null` 与 `Setting.Instance = null` 都被跳过，ModManager 会记一条
 				// "Error disposing mod"——玩家眼里就是"我明明把模组删了，日志里还有 AccessAnarchy 的报错"。
@@ -142,6 +171,32 @@ namespace AccessAnarchy
 				m_Setting = null;
 			}
 			Setting.Instance = null;
+		}
+
+		/// <summary>v0.8.10：注销本轮注册进本地化管理器的 12 个源。
+		/// 拿不到 GameManager / localizationManager（关机序列）就整段跳过，不留报错。</summary>
+		private void RemoveLocaleSources()
+		{
+			if (m_LocaleSources == null)
+			{
+				return;
+			}
+			try
+			{
+				Colossal.Localization.LocalizationManager localization = GameManager.instance?.localizationManager;
+				if (localization != null)
+				{
+					for (int i = 0; i < m_LocaleSources.Length; i++)
+					{
+						localization.RemoveSource(m_LocaleSources[i].locale, m_LocaleSources[i].source);
+					}
+				}
+			}
+			catch (System.Exception ex)
+			{
+				log.Warn("Removing localization sources failed (harmless: they only hold stale strings): " + ex);
+			}
+			m_LocaleSources = null;
 		}
 
 		/// <summary>取消订阅并关掉动作开关。整个动作都要吞异常：退订只是"顺手清理"，

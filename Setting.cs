@@ -326,7 +326,10 @@ namespace AccessAnarchy
 		{
 			// 下拉框选项名不走框架字典（int dropdown 无按值 API），每次重取都跟随当前游戏语言。
 			// 框架通过 GetModeItemsVersion 决定何时重取（见 Mode 属性注释）。
-			LocaleTable.SetActiveLocale(GameManager.instance.localizationManager.activeLocaleId);
+			// v0.8.10：语言取不到就退回默认（en-US）——判空是本项目第三处"取 GameManager 单例"的地方，
+			// 另两处（ReportKeyBindings 的 InputManager、OnDispose 的退订）都早就有这道防护，
+			// 这里原本是裸解引用，理论上会在游戏还没建好管理器时被 UI 求值到。
+			LocaleTable.SetActiveLocale(CurrentLocaleId());
 			return new DropdownItem<int>[2]
 			{
 				new DropdownItem<int>
@@ -342,10 +345,20 @@ namespace AccessAnarchy
 			};
 		}
 
-		/// <summary>下拉框 items 的版本号 = 当前语言标识。语言切换 → 版本变化 → 框架重取 items。</summary>
+		/// <summary>下拉框 items 的版本号 = 当前语言标识。语言切换 → 版本变化 → 框架重取 items。
+		/// v0.8.10：取不到语言时回落到 "en-US"（见 GetModeItems 的同款判空说明）。</summary>
 		public int GetModeItemsVersion()
 		{
-			return GameManager.instance.localizationManager.activeLocaleId.GetHashCode();
+			return CurrentLocaleId().GetHashCode();
+		}
+
+		/// <summary>v0.8.10：当前游戏语言，取不到就回落到默认语言。
+		/// 这是本项目里第三处需要 GameManager 单例的地方（另两处：ReportKeyBindings 判
+		/// InputManager.instance、OnDispose 吞异常），统一走这一个入口，别再裸解引用。</summary>
+		private static string CurrentLocaleId()
+		{
+			string localeId = GameManager.instance?.localizationManager?.activeLocaleId;
+			return string.IsNullOrEmpty(localeId) ? "en-US" : localeId;
 		}
 
 		public override void SetDefaults()

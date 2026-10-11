@@ -4,12 +4,13 @@
 	<!--首发成功（2026-09-12，Unlisted）：ModId 158842。此后重传二进制一律用 PublishNewVersion，别用 Update（会烧版本号）。-->
 	<ModId Value="158842" />
 	<ForumLink Value="" />
-	<ModVersion Value="0.8.9" />
-	<!--v0.8.9 发布（2026-10-08）：这一行与下面的 <ChangeLog> **成对**改掉，之前一直故意留在 0.8.5
+	<ModVersion Value="0.8.10" />
+	<!--v0.8.10 发布：这一行与下面的 <ChangeLog> **成对**改掉，此前一直故意留在旧版本
 	    （v0.8.1 那次提前改了 ModVersion 而 ChangeLog 还挂着 0.8.0 正文，差点在线上把旧日志再推一遍）。
 	    发布前的固定动作仍然有效：①先回读线上、把作者手改过的字段回填进来（FillPublishMetadata 每次全量重推
 	    displayName/short/long/tags/thumbnail/screenshots/acl/externalLinks）；②ModVersion；③ChangeLog
-	    换成新的英中双语正文（中文以作者口述为准，逐字照搬）。-->
+	    换成新的英中双语正文（中文以作者口述为准，逐字照搬）。
+	    ⚠ 发布前必须先关掉游戏，否则 ModPublisher 会锁住正在使用的产物文件。-->
 	<!--线上 requiredVersion 就是这个值；本机游戏 bundleVersion 实测 1.6.0f1（Unity 2022.3.71f1）-->
 	<GameVersion Value="1.6.*" />
 	<AccessLevel Value="Public" />
@@ -31,28 +32,32 @@
 	<ExternalLink Type="x" Url="https://x.com/yuexian777/status/2101942150447702427?s=20" />
 	<!--Change log for NEW VERSION ONLY（线上 changelog 是「一个平台版本一条条目」，条目日期＝该版本发布时间，所以正文里绝不能夹带历史版本的日志；历史条目平台不提供改写，Update/Patch 请求也不携带 changelogEntry，只有 NewVersion 会带）。正文用元素形式、行首不缩进，`- ` 项目符号 + 空行才会被渲染成多行（写成连续行会被压成一整段）。-->
 	<ChangeLog>
-v0.8.9
+v0.8.10
 
-1. Fixed: with "All roads (global)" enabled, some intersections and entrances could stop working again after the game was paused or set to speed 0.
+1. Improved: turning the mod off now restores vehicle yielding to pedestrians without reloading the save, even if the game has been updated and the mod can no longer ask the game for a full rebuild. It also no longer has to mark the entire road network for recalculation, so switching the mod off is much less likely to freeze the game.
 
-2. Fixed: in "Access points only" mode, crosswalks on municipal roads immediately next to an entrance could be affected by mistake; they are now decided by lane ownership.
+2. Improved: in "All roads (global)" mode, bicycles, trams and trains no longer make vehicles yield to pedestrians either - everything that can yield to pedestrians is now covered, as the mode name promises.
 
-3. Optimized: the mod no longer mistakes normal counting fluctuation for "the city has changed", and the long fallback pass is now bounded by real time as well (every 8192 simulation steps, and at least 30 seconds apart), so its cost no longer scales with your simulation speed setting.
+3. Optimized: the mod's own diagnostics now scan the city once per heartbeat instead of twice, halving the occasional 10-40 ms hitch while building.
 
-4. Optimized: the mod's own diagnostic output no longer scans the whole city every heartbeat, which removes the occasional 15-40 ms hitch.
+4. Fixed: repeatedly enabling and disabling the mod in the mod manager no longer leaves stale translation data behind.
 
-5. Adjusted some text descriptions.
+5. Fixed a few rare cases where the mod could report an error while being closed or when its settings page was opened very early.
+
+6. Adjusted some text descriptions.
 
 中文
 
-1. 修复了开启「全部道路（全局）」后，部分路口和出入口在游戏暂停或 0 倍速之后反而失效的问题。
+1. 改进：关掉模组后，车辆对行人的避让会自动恢复，**不需要退出重进存档**；即使游戏更新后模组已经没法再请游戏整体重算，它也能自己恢复。恢复时也不再需要把整张路网全部标记重算，关开关卡住的概率和卡顿幅度都小得多。
 
-2. 修复了"仅出入口"模式下，紧邻出入口的市政道路上的人行横道可能被误伤，现在按车道归属判断。
+2. 改进：「全部道路（全局）」模式下，自行车道、有轨电车道、铁路等同样不再让行人——所有会避让行人的车道现在都覆盖到了，和这个模式的名字一致。
 
-3. 优化了性能：模组不再把正常的计数波动误认为"城市变了"，长兜底周期现在同时受真实时间约束（每 8192 个模拟步，并且至少间隔 30 秒），开销不再随模拟速度档一起放大。
+3. 优化：模组自己的诊断信息每个心跳只扫全城一次（之前两次），施工期偶发的 10~40 毫秒卡顿减半。
 
-4. 优化：模组自身的诊断信息不再每个心跳扫全城，消除了偶发的 15-40 毫秒卡顿。
+4. 修复：在模组管理器里反复关闭再打开模组，不再残留多余的翻译数据。
 
-5. 调整了部分文本说明。
+5. 修复：模组卸载过程中、选项页面极早被打开的少数情况下，可能出现一条属于本模组的报错。
+
+6. 调整了部分文本说明。
 	</ChangeLog>
 </PublishConfiguration>

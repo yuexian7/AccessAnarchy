@@ -23,3 +23,6 @@ out_api.txt
 
 # 本机草稿与探针脚本（含本机路径、游戏二进制扫描产物）
 .local/
+
+# Qoder 会话画布记录（AI 工具残留），绝不入库
+.qoder-credits/

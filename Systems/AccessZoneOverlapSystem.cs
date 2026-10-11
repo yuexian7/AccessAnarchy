@@ -876,12 +876,14 @@ namespace AccessAnarchy.Systems
 			}
 		}
 
-		/// <summary>v0.8.10：软上限兜底（每个模拟步一次，O(1)）。
+		/// <summary>v0.8.10：软上限兜底（心跳诊断一次，O(1)）。
 		/// 稳定状态下这份清单每 ~36 秒会被出入口模式的整轮重建清空一次（兜底周期），
 		/// 所以正常远到不了上限；这里只防"连绵施工 + 集合一直不起轮"这种极端情况把队列撑大。
 		/// 丢掉几条记录无伤大雅：定向标记少覆盖几片，下一轮恢复检查会判成"没恢复"，
 		/// 然后按 <see cref="RetryVanillaOverlapRebuild"/> 的阶梯加力——判据始终是审计扫出来的条目数，
-		/// 不是这份清单。⚠ Count 在有在飞 job 时读取是安全的（job 只 Enqueue，不改已排的槽）。</summary>
+		/// 不是这份清单。⚠ 调用点在 ReportRebuildDiagnostics 的 WaitForJobs() 之后：
+		/// `NativeQueue.Clear()` 与在飞 job 的 `ParallelWriter.Enqueue` 并发执行就是写坏队列内存
+		/// （与 ClearWrittenLanes 同一条不变量），所以不允许在 OnUpdate 开头、job 还在飞的时刻调用。</summary>
 		private void TrimWrittenLanes()
 		{
 			if (!m_WrittenLanes.IsCreated || m_WrittenLanes.Count <= kWrittenLaneCap)
@@ -1241,8 +1243,6 @@ namespace AccessAnarchy.Systems
 			// 每一步开头先把游戏留在 Dependency 上的句柄吸收进自持链：第 2 步起游戏已经把
 			// Dependency 清成 default 了，不吸就可能让上一步的 job 从此无人等待（见 m_JobChain 注释）。
 			SyncJobChain();
-			// v0.8.10：O(1) 的软上限兜底（见 TrimWrittenLanes）。
-			TrimWrittenLanes();
 			if (!m_KeyReported)
 			{
 				m_KeyReported = true;
@@ -1768,6 +1768,9 @@ namespace AccessAnarchy.Systems
 		{
 			// 读 job 写过的计数数组之前必须等在飞的 job 收尾（与 ScanPedestrianOverlaps 同一套做法）。
 			WaitForJobs();
+			// v0.8.10：O(1) 的软上限兜底。此刻在飞 job 已经全部收尾，Clear 不会和
+			// ParallelWriter.Enqueue 撞车（见 TrimWrittenLanes 注释）；心跳天然限频。
+			TrimWrittenLanes();
 			int lanes = 0;
 			int entries = 0;
 			for (int i = 0; i < m_RepairCounterChunks; i++)

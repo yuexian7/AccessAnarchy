@@ -49,14 +49,18 @@
 	</Target>
 
 	<!--
-	  research\ 与 template\ 是开发期反编译调研产物与官方模板副本，绝不能编进模组产物
-	  （SDK 工程 默认通配 **/*.cs，与 BridgeTheLanguageGap 交接文档 §7 T3 的教训一致）。
+	  research\、template\、.local\ 是开发期反编译调研产物、官方模板副本与 agent 工作台，
+	  绝不能编进模组产物（SDK 工程 默认通配 **/*.cs，与 BridgeTheLanguageGap 交接文档 §7 T3 的教训一致）。
+	  .local 里躺着一份反编译的 Game.Simulation.SimulationSystem 副本（C# 10 文件作用域命名空间，
+	  在 LangVersion 9.0 下一旦被纳入就是 CS8773 硬错误）——不能依赖 SDK 默认跳过点开头目录的隐式行为，显式排除。
 	-->
 	<ItemGroup>
 		<Compile Remove="research\**" />
 		<Compile Remove="template\**" />
+		<Compile Remove=".local\**" />
 		<None Remove="research\**" />
 		<None Remove="template\**" />
+		<None Remove=".local\**" />
 	</ItemGroup>
 
 	<ItemGroup>

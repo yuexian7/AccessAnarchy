@@ -348,6 +348,33 @@ namespace AccessAnarchy.Systems
 	/// 就把一整条铁路干线带进来（那会牵连全城道口），所以
 	/// <see cref="BuildAccessSetsJob"/> 里也提前跳过它们，不让它们白跑锚点距离测试。</item>
 	/// </list>
+	///
+	/// v0.8.11（第三轮四维审查的四处修法，全部不动剥离路径与调度语义）：
+	/// <list type="number">
+	/// <item>**审计的集合口径与剥离侧同源**（审查发现 1）。<see cref="AuditPedestrianOverlapsJob"/> 的
+	/// 集合两格（kAuditSetLanes/kAuditSetEntries）原来恒按 includeCrosswalks=1 计数，而出入口模式下
+	/// 市政道路上的横道条目是**按设计保留**的（v0.8.6 起按持有者分类，见 <see cref="CrosswalkScopeFor"/>）
+	/// ⇒ 那行 `Access set audit` 永远读不到 0（2026-10-12 实机全程 787~901 条车道 / 1189~1353 条，
+	/// 而同期 `Rebuild gate: 0 frame(s)`——全是设计保留项，不是漏口），"0 = clean" 名存实亡，
+	/// 与日志括注和归档声明互相矛盾。现在集合两格改用 <see cref="IsFacilityCrosswalkHolder"/> 逐条重数
+	/// （审计 job 为此补四个 ComponentLookup，只对集合成员且有 hit 的车道多跑一趟缓冲遍历）——
+	/// 非零从此等于"我们本该删的回来了"，这行才重新成为漏口判据。</item>
+	/// <item>**audit 自愈补剥**（新功能 F1，依赖上一条）。集合口径修准后，`Access set audit`
+	/// 连续 <see cref="kSetLeakConfirm"/> 次读到同一个漏口，就现场排一次
+	/// <see cref="StripAccessOverlapsFromSetJob"/>（与 (2) 同一个 <see cref="ScheduleAccessSetStrip"/>
+	/// helper，幂等，实机 3 千条 ≈ 几毫秒）——暂停窗口把条目写回来时不再干等 8192 步兜底。
+	/// 要"连续两次"是因为刚起完一轮的那次审计读的是**本步 ECB 回放前**的状态
+	/// （ReportRebuildDiagnostics 的 ⚠ 同款时序），一次残留读数不足以证明漏口持续存在。</item>
+	/// <item>**恢复判据补"关闭态增量"口径**（审查发现 2）。"总量回到基线 8 成"用的是**启用那一刻**
+	/// 的基线，玩家中途修路/拆建之后那把尺子会过期：城市缩小时会出现"其实已恢复却判 NOT restored"，
+	/// 白跑整条重试链还打 5 条 WARN（2026-10-12 实机恢复成功时基线本身已漂了 +42 条）。
+	/// 现在关闭跳变时先采一份"关闭态实测条目数"（一次性全城扫描，10~30 ms），恢复判据改为
+	/// <see cref="RestoreEnough"/>：类别条目回来了 **且**（回到基线 8 成 **或** 比关闭态多恢复出
+	/// max(kRestoreMinRecover, 基线/8) 条）。撕裂态两个口径都不成立，v0.7.8 的防护不放松。</item>
+	/// <item>**定向恢复清单的规模上报**（审查发现 3）。`m_WrittenLanes` 有多少条以前没有任何日志，
+	/// 恢复成本不可见；现在心跳里按"越过 kTrackedLogMin / 变化 ≥25% / 本局第一次"打一行
+	/// `Stripped-lane ledger`，与其它诊断行同一个"变了才写"风格。</item>
+	/// </list>
 	/// </summary>
 	[Preserve]
 	public partial class AccessZoneOverlapSystem : GameSystemBase
@@ -477,6 +504,27 @@ namespace AccessAnarchy.Systems
 		/// 把队列撑到内存里去（131072 × 8 B ≈ 1 MB）。</summary>
 		private const int kWrittenLaneCap = 131072;
 
+		/// <summary>v0.8.11（审查发现 1 的配套）：`Access set audit` 连续多少次读到同一个漏口，
+		/// 才真的现场补剥一次。为什么要"连续两次"：刚起完一轮集合重建的那次审计，读的是
+		/// **本步 ECB 回放之前**的状态（ReportRebuildDiagnostics 的 ⚠ 同款时序）——那一轮的
+		/// 集合批删还没落地，一次残留读数不能证明漏口持续存在。两次之间至少隔一个慢采样点
+		/// （4 个心跳 ≈ 2 分钟）或一次整轮，频率上限由审计自己的降频保证，不新增稳态开销。</summary>
+		private const int kSetLeakConfirm = 2;
+
+		/// <summary>v0.8.11（审查发现 3）：定向恢复清单（m_WrittenLanes）的心跳上报阈值——
+		/// 规模超过这个数、或比上次上报变化超过 1/kTrackedLogShift，就打一行
+		/// `Stripped-lane ledger`。之前这份清单的规模没有任何日志，恢复成本不可见。</summary>
+		private const int kTrackedLogMin = 1024;
+
+		/// <summary><see cref="kTrackedLogMin"/> 的相对变化幅度分母（1/4 = 变化 25% 起报）。</summary>
+		private const int kTrackedLogShift = 4;
+
+		/// <summary>v0.8.11（审查发现 2）：恢复判据"比关闭态多恢复多少条"的绝对下限。
+		/// "总量回到基线 8 成"用的是启用那一刻的基线，玩家中途修路/拆建之后那把尺子会过期；
+		/// 这条以关闭时实测的条目数为标尺，两个口径并列（见 <see cref="RestoreEnough"/>）。
+		/// 撕裂态下我们删的条目一条都没回来，读数≈关闭态，两个口径都不成立，判据不放松。</summary>
+		private const int kRestoreMinRecover = 64;
+
 		/// <summary>v0.8.10：反射恢复路径的自检三态。
 		/// v0.8.10 之前"反射置 m_Loaded"失败与否只能靠猜（拿不到字段时报一行 WARN，字段还在但被游戏
 		/// 改名/换类型时连 WARN 都没有）。现在置位后隔**一个渲染帧**读回一次：原版 GetLoaded() 消费掉它会
@@ -521,7 +569,10 @@ namespace AccessAnarchy.Systems
 		/// <summary>v0.8.10：出入口模式的邻域集合成员在同一遍扫描里的残留读数（与 kAuditVehicleLanes 同批
 		/// 算出，只是多一次集合查找）。合进来之前它由 <see cref="AuditAccessSetJob"/> **单独**扫一遍集合
 		/// （IJob 逐实体随机读缓冲，作者实机 6.5 万条 ⇒ 主线程阻塞 15~40 ms），而同一时刻全局模式那边也在
-		/// 扫全城 ⇒ 一次心跳付两笔全量扫描。现在合成一笔，两个口径同源，也再没有"两边数字互相矛盾"的可能。</summary>
+		/// 扫全城 ⇒ 一次心跳付两笔全量扫描。现在合成一笔，两个口径同源，也再没有"两边数字互相矛盾"的可能。
+		/// ⚠ v0.8.11（审查发现 1）："与剥离侧同源"在本版之前没真正做到（Execute 里集合两格恒按
+		/// includeCrosswalks=1 数，把按设计保留的市政横道条目也算成残留 ⇒ 那行永远读不到 0）；
+		/// 现在按 <see cref="IsFacilityCrosswalkHolder"/> 逐条重数，口径才真正对齐。</summary>
 		private const int kAuditSetLanes = 10;
 		private const int kAuditSetEntries = 11;
 
@@ -812,6 +863,21 @@ namespace AccessAnarchy.Systems
 
 		/// <summary>v0.8.10：已经做过几次后台重试。</summary>
 		private int m_RestoreBgRetries;
+
+		/// <summary>v0.8.11：`Access set audit` 连续几次在邻域集合里读到漏口（0 = 干净或刚清零；
+		/// 攒到 <see cref="kSetLeakConfirm"/> 次就现场补剥一次，见 RunCoverageScan 与
+		/// <see cref="ScheduleAccessSetStrip"/>）。只在出入口模式有意义。</summary>
+		private int m_SetLeakSeen;
+
+		/// <summary>v0.8.11：上一次写进日志的定向恢复清单规模（-1 = 本局还没写过）。
+		/// 心跳上报的"上次值"，判据见 ReportRebuildDiagnostics 里 kTrackedLogMin 那段。</summary>
+		private int m_LastLoggedTracked = -1;
+
+		/// <summary>v0.8.11：关闭跳变那一刻、触发原版重建**之前**实测在场的行人条目数
+		/// （-1 = 没采到）。它是恢复判据的第二把尺子：启用时采的基线会随修路/拆建过期，
+		/// 这把尺子量的是"比关闭态恢复了多少"。采在重建之前——重建之后条目回来就分不清
+		/// 哪些是我们删的、哪些是城市本来有的。</summary>
+		private int m_RestoreStrippedEntries = -1;
 
 		/// <summary>全局重剥的诊断计数（每 chunk 两格：SetBuffer 写入次数、删掉的行人条目数），
 		/// 与 <see cref="m_RepairCounters"/> 同构但必须分开：闸门重删与全城重剥在同一步里都会排，
@@ -1175,6 +1241,10 @@ namespace AccessAnarchy.Systems
 			m_LoadedProbeFrame = -1;
 			m_RestoreBgCountdown = 0;
 			m_RestoreBgRetries = 0;
+			// v0.8.11：漏口自愈计数、清单上报基准与关闭态读数一起复位（换图后全部重新起算）。
+			m_SetLeakSeen = 0;
+			m_LastLoggedTracked = -1;
+			m_RestoreStrippedEntries = -1;
 			m_ActiveSetIndex = 0;
 			m_Cursor = -1;
 			m_SetsInitialized = false;
@@ -1282,6 +1352,9 @@ namespace AccessAnarchy.Systems
 					// 关闭态不需要补剥（恢复沿会把条目全部还给原版），把信号一起丢掉，
 					// 免得"重新启用"的第一步就因为关闭期间的渲染帧差去扫全城。
 					m_GlobalSweepSignal = false;
+					// v0.8.11：漏口自愈同样只在启用态有意义——关闭态集合已作废（m_SetsStale），
+					// 留着计数只会在重新启用后误导第一次审计。
+					m_SetLeakSeen = 0;
 				}
 				// 审计只在关闭态推进：启用态下我们本来就在删，测出的 0 会误判成"没恢复"，
 				// 进而白跑一次全城 owner+lane Updated（v0.7.2 时代那种 churn）。
@@ -1530,29 +1603,14 @@ namespace AccessAnarchy.Systems
 				scheduled = true;
 			}
 
-			// (2) access 模式集合刚建好时批量 A
-			if (!globalMode && setsJustReady && m_VehicleSets[m_ActiveSetIndex].Count > 0)
+			// (2) access 模式集合刚建好时批量 A（v0.8.11：与 audit 自愈补剥共用同一个 helper，
+			// 两条路径的命令构造零偏差；helper 内部自己取命令缓冲）
+			if (!globalMode && setsJustReady && ScheduleAccessSetStrip(setting.Mode))
 			{
-				StripAccessOverlapsFromSetJob accessJob = new StripAccessOverlapsFromSetJob
-				{
-					m_Set = m_VehicleSets[m_ActiveSetIndex],
-					m_Overlaps = GetBufferLookup<LaneOverlap>(isReadOnly: true),
-					m_PedestrianLaneData = GetComponentLookup<PedestrianLane>(isReadOnly: true),
-					m_ConnectionLaneData = GetComponentLookup<ConnectionLane>(isReadOnly: true),
-					m_GarageLaneData = GetComponentLookup<GarageLane>(isReadOnly: true),
-					m_AreaLaneData = GetComponentLookup<AreaLane>(isReadOnly: true),
-					m_CarLaneData = GetComponentLookup<CarLane>(isReadOnly: true),
-					m_ParkingLaneData = GetComponentLookup<ParkingLane>(isReadOnly: true),
-					m_OwnerData = GetComponentLookup<Owner>(isReadOnly: true),
-					m_EdgeData = GetComponentLookup<Edge>(isReadOnly: true),
-					m_NodeData = GetComponentLookup<Node>(isReadOnly: true),
-					m_Mode = setting.Mode,
-					m_Ecb = ecb,
-					m_Written = m_WrittenLanes.AsParallelWriter()
-				};
-				accessJob.m_SortKeyBase = kSortKeyFromSet;
-				m_JobChain = accessJob.Schedule(m_JobChain);
 				scheduled = true;
+				// v0.8.11：刚起完一轮的这批删除就是最新鲜的动作，漏口计数就此清零——
+				// 否则"本轮审计读的是 ECB 回放前状态"的残留读数会把自愈计数攒起来（见 RunCoverageScan）。
+				m_SetLeakSeen = 0;
 			}
 
 			// (3) 每帧事件驱动重刷：只处理带 Updated 的车道（LaneOverlapSystem 刚重建过 overlap 的）。
@@ -1771,6 +1829,18 @@ namespace AccessAnarchy.Systems
 			// v0.8.10：O(1) 的软上限兜底。此刻在飞 job 已经全部收尾，Clear 不会和
 			// ParallelWriter.Enqueue 撞车（见 TrimWrittenLanes 注释）；心跳天然限频。
 			TrimWrittenLanes();
+			// v0.8.11（审查发现 3）：定向恢复清单的规模上报。这份清单只在恢复的定向档里被消费，
+			// 此前它的规模没有任何日志——恢复花了多大代价（标几个 owner）完全不可见。
+			// 判据与其它诊断行同一个风格：本局第一次 / 越过阈值 / 比上次变化够大，才写一行。
+			int tracked = m_WrittenLanes.IsCreated ? m_WrittenLanes.Count : 0;
+			bool trackedShift = m_LastLoggedTracked > 0
+				&& (tracked >= m_LastLoggedTracked + m_LastLoggedTracked / kTrackedLogShift + 1
+					|| tracked + m_LastLoggedTracked / kTrackedLogShift + 1 <= m_LastLoggedTracked);
+			if (m_LastLoggedTracked < 0 || tracked >= kTrackedLogMin || trackedShift)
+			{
+				m_LastLoggedTracked = tracked;
+				AccessAnarchyMod.log.Info($"Stripped-lane ledger: {tracked} lane(s) tracked for targeted restore (soft cap {kWrittenLaneCap}; consumed only by the targeted restore path, not by the reflection path).");
+			}
 			int lanes = 0;
 			int entries = 0;
 			for (int i = 0; i < m_RepairCounterChunks; i++)
@@ -1913,7 +1983,23 @@ namespace AccessAnarchy.Systems
 					m_LastAuditSet = setCount;
 					m_LastAuditLanes = totals.m_SetLanes;
 					m_LastAuditEntries = totals.m_SetEntries;
-					AccessAnarchyMod.log.Info($"Access set audit: {totals.m_SetLanes} of {setCount} vehicle lanes still hold {totals.m_SetEntries} pedestrian overlap entries (0 = clean; crosswalk entries on street lanes are kept by design and are not counted).");
+					// v0.8.11（审查发现 1）：括注改口径。集合两格现在与剥离侧同源
+					// （市政道路上按设计保留的横道条目不再计入，见 AuditPedestrianOverlapsJob 的
+					// m_Set 注释），所以"非零"就是真漏口，不再是永远擦不掉的常数。
+					AccessAnarchyMod.log.Info($"Access set audit: {totals.m_SetLanes} of {setCount} vehicle lanes still hold {totals.m_SetEntries} pedestrian overlap entries (0 = clean; counts only what this mod itself strips, so a persistent non-zero value is a real leak).");
+				}
+				// v0.8.11（新功能 F1，依赖发现 1 的口径修正）：漏口自愈。连续两次审计都读到
+				// 同一个漏口才动手——一次读数可能只是"本步 ECB 还没回放"的短暂残留
+				// （ReportRebuildDiagnostics 的 ⚠ 同款时序）。清零条件与调度失败都要复位/保留计数：
+				// 干净了就归零，没排上（比如拿不到命令缓冲）就留着让下一次审计再试。
+				m_SetLeakSeen = (totals.m_SetEntries > 0) ? m_SetLeakSeen + 1 : 0;
+				if (m_SetLeakSeen >= kSetLeakConfirm)
+				{
+					if (ScheduleAccessSetStrip(Setting.kModeAccessOnly))
+					{
+						m_SetLeakSeen = 0;
+						AccessAnarchyMod.log.Info($"Access set audit: the leak survived {kSetLeakConfirm} consecutive readings - re-stripped the whole vehicle set now (self-heal, without waiting for the next rebuild round).");
+					}
 				}
 				if (samples.IsCreated)
 				{
@@ -1962,6 +2048,18 @@ namespace AccessAnarchy.Systems
 		/// </summary>
 		private void RestoreVanillaOverlaps()
 		{
+			// v0.8.11（审查发现 2）：触发重建**之前**先采一份"关闭态实测"读数，作为恢复判据的
+			// 第二把尺子（第一把是启用时的基线，会随修路/拆建过期——城市缩小时旧判据会把
+			// "其实已恢复"误判成 NOT restored，白跑整条重试链）。必须采在重建之前：重建之后
+			// 条目回来，就分不清哪些是我们删的、哪些是城市本来有的。
+			// 代价是一次全城扫描（WaitForJobs + ScheduleParallel + Complete，大城 10~30 ms），
+			// 只在关闭跳变这一刻付一次，与恢复检查自己那几笔同量级。
+			m_RestoreStrippedEntries = -1;
+			if (ScanPedestrianOverlaps(out AuditTotals stripped, out _, collectSamples: false, vehicleSet: m_VehicleSets[m_ActiveSetIndex]))
+			{
+				m_RestoreStrippedEntries = stripped.m_Entries;
+				AccessAnarchyMod.log.Info($"Restore baseline: {stripped.m_Entries} pedestrian entries still present while stripped (crosswalk {stripped.m_CrosswalkEntries}, non-crosswalk {stripped.m_Entries - stripped.m_CrosswalkEntries}); enable-time vanilla baseline {m_BaselineEntries} (crosswalk {m_BaselineCrosswalk}) - the disable-time reading guards the baseline against city changes between enabling and disabling.");
+			}
 			TriggerVanillaOverlapRebuild("disabled", allowTargetedFallback: true);
 			m_AuditChecks = 0;
 			m_RestoreBgCountdown = 0;
@@ -2041,6 +2139,55 @@ namespace AccessAnarchy.Systems
 				targeted = ScheduleMarkUpdatedTargeted();
 			}
 			AccessAnarchyMod.log.Warn($"Restore retry after check {check}: m_Loaded again={forced}, targeted marking={targeted}, full-city marking={fullCity}; next check in {kRestoreCheckDelays[math.clamp(check, 0, kRestoreCheckDelays.Length - 1)]} frames.");
+		}
+
+		/// <summary>
+		/// v0.8.11：出入口模式的"集合批删"调度点。两条调用路径共用它，保证命令构造零偏差：
+		/// ① OnUpdate 的 (2)——整轮集合刚建好时；
+		/// ② <see cref="RunCoverageScan"/> 的 audit 自愈——连续 kSetLeakConfirm 次读到同一个漏口时。
+		/// 自愈路径多打一次同样的批删是幂等的（两次内容都取自同一份只读快照），最坏代价是一次
+		/// 集合遍历（实机 ~3 千条，几毫秒）。返回 false = 集合没就绪/为空/拿不到命令缓冲，
+		/// 调用方按"没排上"处理即可（自愈路径会把它留到下一次审计）。
+		/// ⚠ 自己取命令缓冲而不是复用 OnUpdate 那一份：本方法也会从心跳诊断里调用，
+		/// 那里手里没有缓冲；EndFrameBarrier 同一步允许多个 ECB，回放按创建顺序，
+		/// 自愈那一份必然更晚回放——与"最新的快照赢"正好同向。
+		/// </summary>
+		private bool ScheduleAccessSetStrip(int mode)
+		{
+			if (!m_SetsInitialized)
+			{
+				return false;
+			}
+			NativeHashSet<Entity> set = m_VehicleSets[m_ActiveSetIndex];
+			if (!set.IsCreated || set.Count == 0)
+			{
+				return false;
+			}
+			if (!TryCreateBarrierBuffer(out EntityCommandBuffer.ParallelWriter ecb))
+			{
+				return false;
+			}
+			StripAccessOverlapsFromSetJob accessJob = new StripAccessOverlapsFromSetJob
+			{
+				m_Set = set,
+				m_Overlaps = GetBufferLookup<LaneOverlap>(isReadOnly: true),
+				m_PedestrianLaneData = GetComponentLookup<PedestrianLane>(isReadOnly: true),
+				m_ConnectionLaneData = GetComponentLookup<ConnectionLane>(isReadOnly: true),
+				m_GarageLaneData = GetComponentLookup<GarageLane>(isReadOnly: true),
+				m_AreaLaneData = GetComponentLookup<AreaLane>(isReadOnly: true),
+				m_CarLaneData = GetComponentLookup<CarLane>(isReadOnly: true),
+				m_ParkingLaneData = GetComponentLookup<ParkingLane>(isReadOnly: true),
+				m_OwnerData = GetComponentLookup<Owner>(isReadOnly: true),
+				m_EdgeData = GetComponentLookup<Edge>(isReadOnly: true),
+				m_NodeData = GetComponentLookup<Node>(isReadOnly: true),
+				m_Mode = mode,
+				m_Ecb = ecb,
+				m_Written = m_WrittenLanes.AsParallelWriter()
+			};
+			accessJob.m_SortKeyBase = kSortKeyFromSet;
+			m_JobChain = accessJob.Schedule(m_JobChain);
+			m_EndFrameBarrier.AddJobHandleForProducer(m_JobChain);
+			return true;
 		}
 
 		/// <summary>
@@ -2300,7 +2447,11 @@ namespace AccessAnarchy.Systems
 		/// 让"集合成员还剩多少行人条目"在这同一遍里算出（原来由 AuditAccessSetJob 单独扫，
 		/// 一次心跳付两笔全量扫描）。全局模式传 default（0 成员，集合口径恒为 0）。
 		/// 基线与恢复检查两条沿不采——它们要的是总数，多分配一个 Persistent 数组反而带来
-		/// "卸载时谁释放它"的新问题（见 <see cref="OnDestroy"/> 的卸载安全约束）。</summary>
+		/// "卸载时谁释放它"的新问题（见 <see cref="OnDestroy"/> 的卸载安全约束）。
+		/// ⚠ 只许在**有限频次**的路径调用：基线（每局一次）/ 恢复检查（关闭态，30~1200 帧逐档）/
+		/// 心跳诊断（1800 步一次，且还有 4 心跳慢兜底）/ 关闭跳变（本局一次，v0.8.11 起多采一份）。
+		/// 它是 WaitForJobs + 全城 ScheduleParallel + 同步 Complete（大城 10~30 ms 主线程阻塞），
+		/// 进每帧或无节流路径就是把 v0.8.4 压下去的常态税请回来——**禁止**那样用。</summary>
 		private bool ScanPedestrianOverlaps(out AuditTotals totals, out NativeArray<int> samples, bool collectSamples, NativeHashSet<Entity> vehicleSet)
 		{
 			totals = default(AuditTotals);
@@ -2330,6 +2481,11 @@ namespace AccessAnarchy.Systems
 				m_PedestrianLaneType = GetComponentTypeHandle<PedestrianLane>(isReadOnly: true),
 				m_PedestrianLaneData = GetComponentLookup<PedestrianLane>(isReadOnly: true),
 				m_ConnectionLaneData = GetComponentLookup<ConnectionLane>(isReadOnly: true),
+				// v0.8.11（审查发现 1）：集合口径逐条判横道用的四个 lookup（见 AuditPedestrianOverlapsJob）。
+				m_GarageLaneData = GetComponentLookup<GarageLane>(isReadOnly: true),
+				m_AreaLaneData = GetComponentLookup<AreaLane>(isReadOnly: true),
+				m_CarLaneData = GetComponentLookup<CarLane>(isReadOnly: true),
+				m_ParkingLaneData = GetComponentLookup<ParkingLane>(isReadOnly: true),
 				m_OwnerData = GetComponentLookup<Owner>(isReadOnly: true),
 				m_EdgeData = GetComponentLookup<Edge>(isReadOnly: true),
 				m_NodeData = GetComponentLookup<Node>(isReadOnly: true),
@@ -2410,6 +2566,37 @@ namespace AccessAnarchy.Systems
 		}
 
 		/// <summary>
+		/// v0.8.11（审查发现 2）：恢复判据的"总量"口径，两条腿并列——
+		/// ① 回到**启用时**基线的 8 成（v0.7.8 原判据，留 2 成给期间修路/拆路）；
+		/// ② 比**关闭那一刻**多恢复出 max(kRestoreMinRecover, 基线/8) 条。
+		/// 为什么需要②：①的基线采在启用后第一遍，玩家中途修路/拆建之后就过期了。城市缩水时
+		/// 会出现"原版明明重建了、条目也回来了，却永远够不到 8 成旧基线" ⇒ 误判 NOT restored，
+		/// 白跑五轮重试 + 后台重试还打 WARN。②用关闭态实测当标尺，专治这种漂移。
+		/// 撕裂态（我们删的条目一条都没回来）下两个口径都不成立：读数≈关闭态、远低于旧基线
+		/// ⇒ v0.7.8 的防护不放松。没有基线（读档后没跑到过启用态）时保持"算够"的旧行为。
+		/// </summary>
+		private bool RestoreEnough(int entries)
+		{
+			if (!m_BaselineTaken || m_BaselineEntries <= 0)
+			{
+				return true;
+			}
+			if (entries >= (m_BaselineEntries * 4) / 5)
+			{
+				return true;
+			}
+			if (m_RestoreStrippedEntries >= 0)
+			{
+				int minRecover = math.max(kRestoreMinRecover, m_BaselineEntries / 8);
+				if (entries - m_RestoreStrippedEntries >= minRecover)
+				{
+					return true;
+				}
+			}
+			return false;
+		}
+
+		/// <summary>
 		/// 关闭后的恢复检查（v0.7.8 重写）。v0.7.7 的判据是"车辆车道上还有任何行人条目就算恢复"，
 		/// 实机被这个判据骗过两次：出入口模式我们从不动横道条目，所以哪怕原版重建完全没落地、
 		/// 我们删掉的非横道条目一条都没回来，日志里横道那几万条也照样把判据判成"已恢复"，
@@ -2451,8 +2638,9 @@ namespace AccessAnarchy.Systems
 			// 出入口模式横道条目从未被动过（v0.7.7 就是被这几万条横道条目糊弄成"已恢复"的），
 			// 全局模式横道条目也删过，看横道回来即证明重建落地。
 			bool classBack = m_RestoreCheckGlobal ? crosswalkEntries > 0 : nonCrosswalk > 0;
-			// 有基线再加一道总量闸：条目数得回到基线的 8 成（留 2 成给期间修路/拆路）。
-			bool enough = !m_BaselineTaken || m_BaselineEntries <= 0 || entries >= (m_BaselineEntries * 4) / 5;
+			// v0.8.11（审查发现 2）：总量闸走 RestoreEnough——基线 8 成（旧）与"比关闭态多恢复
+			// 多少"（新，治基线过期）两条腿并列，撕裂态两个都不成立。
+			bool enough = RestoreEnough(entries);
 			bool restored = classBack && enough;
 			AccessAnarchyMod.log.Info($"Restore check #{m_AuditChecks} ({(m_RestoreCheckGlobal ? "global" : "access-zones")}): {lanes} lanes, {entries} pedestrian entries (crosswalk {crosswalkEntries}, non-crosswalk {nonCrosswalk}) vs baseline {m_BaselineEntries} (crosswalk {m_BaselineCrosswalk}); vehicle holders {scan.m_VehicleEntries} entries on {scan.m_VehicleLanes}/{scan.m_VehicleScanned} lane(s), street & intersection {scan.m_RoadEntries} on {scan.m_RoadLanes}/{scan.m_RoadScanned} - {(restored ? "vanilla avoidance restored" : $"NOT restored (classBack={classBack} enough={enough})")}.");
 			if (restored)
@@ -2510,7 +2698,8 @@ namespace AccessAnarchy.Systems
 			int crosswalkEntries = scan.m_CrosswalkEntries;
 			int nonCrosswalk = scan.m_Entries - crosswalkEntries;
 			bool classBack = m_RestoreCheckGlobal ? crosswalkEntries > 0 : nonCrosswalk > 0;
-			bool enough = !m_BaselineTaken || m_BaselineEntries <= 0 || scan.m_Entries >= (m_BaselineEntries * 4) / 5;
+			// v0.8.11（审查发现 2）：与正式检查同一个 RestoreEnough（基线 8 成 / 关闭态增量 两条腿）。
+			bool enough = RestoreEnough(scan.m_Entries);
 			if (classBack && enough)
 			{
 				AccessAnarchyMod.log.Info($"Background restore retry {m_RestoreBgRetries} succeeded: vanilla avoidance restored without reloading the save.");
@@ -3901,6 +4090,22 @@ namespace AccessAnarchy.Systems
 			[ReadOnly]
 			public ComponentLookup<ConnectionLane> m_ConnectionLaneData;
 
+			/// <summary>v0.8.11（审查发现 1）：集合口径要按 <see cref="IsFacilityCrosswalkHolder"/> 逐条判
+			/// 横道，那套判据是 ComponentLookup 版本（与剥离侧同一个方法，避免出现第三份会漂移的判定），
+			/// 所以这里补四个 lookup——chunk 级 type handle 判不了"连道带不带 Inside、车行道归不归建筑自有"。
+			/// 只有集合成员且真有 hit 的车道才会用到它们，成本是一次哈希查找 ×4。</summary>
+			[ReadOnly]
+			public ComponentLookup<GarageLane> m_GarageLaneData;
+
+			[ReadOnly]
+			public ComponentLookup<AreaLane> m_AreaLaneData;
+
+			[ReadOnly]
+			public ComponentLookup<CarLane> m_CarLaneData;
+
+			[ReadOnly]
+			public ComponentLookup<ParkingLane> m_ParkingLaneData;
+
 			[ReadOnly]
 			public ComponentLookup<Owner> m_OwnerData;
 
@@ -3920,7 +4125,12 @@ namespace AccessAnarchy.Systems
 			/// （作者实机 6.5 万条 ⇒ 主线程阻塞 15~40 ms）并进这一遍全城扫描：
 			/// 每条车辆车道多一次哈希查找，换来"一次心跳只扫一遍"。
 			/// 判读口径与剥离侧同源（<see cref="CrosswalkScopeFor"/> 按持有者判横道），
-			/// 所以"0 = 干净"仍然等价于"该删的都删了"。</summary>
+			/// 所以"0 = 干净"仍然等价于"该删的都删了"。
+			/// ⚠ v0.8.11（审查发现 1）：上面这句"同源"在本版之前**没有真正做到**——Execute 里
+			/// 集合两格恒按 includeCrosswalks=1 计数，而出入口模式下市政道路的横道条目按设计保留
+			/// （CrosswalkScopeFor 只对设施持有者删横道），于是这行永远读不到 0（2026-10-12 实机
+			/// 全程 787~901 条车道 / 1189~1353 条，同期 Rebuild gate: 0 frame(s)——全是设计保留项）。
+			/// 现在集合两格按 <see cref="IsFacilityCrosswalkHolder"/> 逐条重数（见 Execute 内 setScope）。</summary>
 			[ReadOnly]
 			public NativeHashSet<Entity> m_Set;
 
@@ -4045,8 +4255,24 @@ namespace AccessAnarchy.Systems
 						entries += hit;
 						if (useSet && m_Set.Contains(lane))
 						{
+							// v0.8.11（审查发现 1）：集合两格改用剥离侧同源口径。上面的 hit 是按
+							// includeCrosswalks=1 数的——审计要的是"原版有没有把条目写回来"的事实口径；
+							// 而集合这两格回答的是"我们本该删的回来了没有"，出入口模式下市政道路的横道
+							// 条目按设计保留（CrosswalkScopeFor 只对设施持有者删横道），必须逐条按剥离侧
+							// 口径重数，否则这行永远读不到 0（2026-10-12 实机全程 ~1200 条设计保留项）。
+							int setScope = IsFacilityCrosswalkHolder(lane, m_PedestrianLaneData, m_GarageLaneData,
+								m_ConnectionLaneData, m_AreaLaneData, m_CarLaneData, m_ParkingLaneData,
+								m_OwnerData, m_EdgeData, m_NodeData) ? 1 : 0;
+							int setHit = 0;
+							for (int j = 0; j < buffer.Length; j++)
+							{
+								if (IsPedestrianLaneEntity(buffer[j].m_Other, m_PedestrianLaneData, m_ConnectionLaneData, setScope))
+								{
+									setHit++;
+								}
+							}
 							setLanes++;
-							setEntries += hit;
+							setEntries += setHit;
 						}
 						if (holderIsVehicle)
 						{

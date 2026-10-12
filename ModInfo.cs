@@ -12,7 +12,7 @@ namespace AccessAnarchy
 		/// 本文件是唯一真源：发布时 <c>Properties\PublishConfiguration.xml</c> 的
 		/// <c>&lt;ModVersion&gt;</c> 必须与它一致——v0.7.9 出过一次"线上 0.7.9、启动日志 0.7.8"，
 		/// 根因就是版本号散落在日志字符串里。</summary>
-		public const string kVersion = "0.8.10";
+		public const string kVersion = "0.8.11";
 
 		/// <summary>作者署名，按作者本人要求逐字使用。</summary>
 		public const string kAuthor = "yuexian";

@@ -876,8 +876,10 @@ namespace AccessAnarchy.Systems
 		/// （它前面没有 WaitForJobs，硬清就会与刚排出的 job 的 Enqueue 撞车），清单自然累积。
 		/// 累积无害：恢复判据是审计扫出来的条目数，多几条记录只是多标几个 owner；真正的上限由
 		/// <see cref="kWrittenLaneCap"/> 兜底。换图时由 ResetWorldCaches 清（它开头同样先 WaitForJobs）。
-		/// 恢复时排空交给 <see cref="MarkUpdatedTargetedJob"/>。跨帧有效性问题：里面的实体可能已被游戏删掉，
-		/// 所以下游 job 必须先判 `m_UpdatedData.HasComponent`/Owner 是否存在（MarkUpdatedTargetedJob 有这道守卫）。
+		/// 恢复时由 <see cref="ScheduleMarkUpdatedTargeted"/> 排空。跨帧有效性问题：里面的实体可能已被
+		/// 游戏删掉（P2 遗留，2026-10-13 收尾补丁）——这道守卫现在在**主线程**排空时做
+		/// （<see cref="RestoreJudgment.ChooseRestoreTarget"/>），在 ECB 回放之前就把死实体挡住；
+		/// 下游 <see cref="MarkUpdatedTargetedJob"/> 只剩"已带 Updated 的跳过"这一件事实要查。
 		private NativeQueue<Entity> m_WrittenLanes;
 
 		/// <summary>v0.8.10：反射恢复路径的自检状态（见 kLoadedProbe*）。</summary>

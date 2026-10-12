@@ -58,9 +58,13 @@
 		<Compile Remove="research\**" />
 		<Compile Remove="template\**" />
 		<Compile Remove=".local\**" />
+		<!-- tests\ 是 T3 离线回归壳自己的工程（net48 Exe、零游戏引用），绝不能被模组工程
+		     的通配收进产物；壳反过来只 <Compile Include> 那份纯 BCL 判据文件。 -->
+		<Compile Remove="tests\**" />
 		<None Remove="research\**" />
 		<None Remove="template\**" />
 		<None Remove=".local\**" />
+		<None Remove="tests\**" />
 	</ItemGroup>
 
 	<ItemGroup>

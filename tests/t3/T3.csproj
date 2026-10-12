@@ -1,0 +1,44 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+    <!--
+      T3：Access Anarchy 的无游戏回归壳（开发技能 §8「能在下层测出来的绝不带到上层」）。
+
+      刻意【不 Import】Mod.props / Mod.targets：那两个文件会带上游戏程序集引用与 DeployWIP
+      （每次构建把游戏部署目录整个删掉重铺）。测试壳绝不能碰部署目录。
+      同样刻意【一个 <Reference> 都不填】：壳只编 ..\Systems\RestoreJudgment.cs 这一份纯 BCL
+      源码，从结构上保证「被测代码根本不依赖游戏程序集」——哪天有人往 RestoreJudgment 里
+      加一句 Unity.Mathematics 或 ComponentLookup，壳会直接编译失败，而不是静默把覆盖降级掉。
+
+      与模组 csproj 编的是**同一份文件**（`<Compile Include>`，不是拷贝进 tests\），
+      所以不存在"两份实现漂移"这个最大的假绿来源。
+
+      退出码：0 = 全绿；1 = 有失败。scripts\verify.mjs 读退出码 + 最后一行的 PASS/FAIL 计数。
+    -->
+    <PropertyGroup>
+        <OutputType>Exe</OutputType>
+        <TargetFramework>net48</TargetFramework>
+        <LangVersion>9.0</LangVersion>
+        <AssemblyName>AccessAnarchy.T3</AssemblyName>
+        <RootNamespace>AccessAnarchy.T3</RootNamespace>
+        <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+        <Configurations>Debug;Release</Configurations>
+        <AutoGenerateBindingRedirects>false</AutoGenerateBindingRedirects>
+        <Nullable>disable</Nullable>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <!-- 本机没装 net48 目标包（无 Visual Studio）：此包只提供编译期参考程序集，
+             PrivateAssets=all 保证它不进产物、不产生运行期依赖。 -->
+        <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <!-- 被测源码：与模组 csproj 同一份文件。加新文件前先确认它一个游戏类型都不碰。 -->
+        <Compile Include="..\..\Systems\RestoreJudgment.cs" />
+        <!-- 壳自身 -->
+        <Compile Include="Program.cs" />
+        <Compile Include="Check.cs" />
+        <Compile Include="Tests.Judgment.cs" />
+    </ItemGroup>
+
+</Project>

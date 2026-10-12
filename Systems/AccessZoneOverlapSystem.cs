@@ -2259,6 +2259,11 @@ namespace AccessAnarchy.Systems
 		/// 重建这些 owner 的 overlap（闸门 m_UpdatedOwnersQuery=[SubLane,Updated,!Deleted]）。
 		/// 不依赖任何私有字段名，开销与我们改过的车道数成正比。
 		/// 返回 false = 清单为空（没有任何东西需要恢复，原版状态就是我们要的）。
+		///
+		/// P2 遗留（2026-10-13 收尾补丁）：排空的同时在主线程过滤陈旧实体——清单是跨帧累计的，
+		/// 玩家"标记后立刻拆路/拆建筑"再关模组，清单里就是一堆死引用。见
+		/// <see cref="RestoreJudgment.ChooseRestoreTarget"/>：被删的车道直接放弃（跳过且计数，
+		/// 有跳过就打一行日志），owner 已被拆的退回标车道自己。
 		/// </summary>
 		private bool ScheduleMarkUpdatedTargeted()
 		{
@@ -2271,9 +2276,35 @@ namespace AccessAnarchy.Systems
 			}
 			// 用 HashSet 去重：同一条车道可能被闸门重删、反向一跳、事件重刷三路各记一次。
 			NativeHashSet<Entity> targets = new NativeHashSet<Entity>(m_WrittenLanes.Count, Allocator.TempJob);
+			// P2 遗留：清单是跨帧累计的（入口处进图时就在记），玩家"标记后立刻拆路/拆建筑"再关模组，
+			// 清单里就是一堆死引用。存在性检查必须放在主线程（EntityManager.Exists 按 index+version 判，
+			// 在 ECB 回放**之前**就把死实体挡住）：帧末对不存在的实体做 AddComponent 是 SDK 不保证的行为，
+			// 轻则游戏打一条 Critical、重则整批回放中断。选型判据本身是纯函数，见
+			// <see cref="RestoreJudgment.ChooseRestoreTarget"/>（离线壳真值表覆盖）。
+			int staleSkipped = 0;
 			while (m_WrittenLanes.TryDequeue(out Entity lane))
 			{
-				targets.Add(lane);
+				Owner owner = default;
+				bool laneExists = EntityManager.Exists(lane);
+				bool hasOwnerRef = laneExists && EntityManager.HasComponent<Owner>(lane)
+					&& (owner = EntityManager.GetComponentData<Owner>(lane)).m_Owner != Entity.Null;
+				bool ownerExists = hasOwnerRef && EntityManager.Exists(owner.m_Owner);
+				switch (RestoreJudgment.ChooseRestoreTarget(laneExists, hasOwnerRef, ownerExists))
+				{
+					case RestoreTargetChoice.Skip:
+						staleSkipped++;
+						continue;
+					case RestoreTargetChoice.Owner:
+						targets.Add(owner.m_Owner);
+						continue;
+					default:
+						targets.Add(lane);
+						break;
+				}
+			}
+			if (staleSkipped > 0)
+			{
+				AccessAnarchyMod.log.Info($"Restore targeted: skipped {staleSkipped} destroyed lane(s) in the written-lane list (marked then removed before the mod was turned off).");
 			}
 			if (targets.Count == 0)
 			{
@@ -2289,7 +2320,6 @@ namespace AccessAnarchy.Systems
 			{
 				m_Targets = targets,
 				m_UpdatedData = GetComponentLookup<Updated>(isReadOnly: true),
-				m_OwnerData = GetComponentLookup<Owner>(isReadOnly: true),
 				m_SortKeyBase = kSortKeyRestoreTargeted,
 				m_Ecb = ecb
 			};
@@ -2439,11 +2469,12 @@ namespace AccessAnarchy.Systems
 
 		/// <summary>
 		/// v0.8.10：定向恢复用的标记 job（见 <see cref="ScheduleMarkUpdatedTargeted"/>）。
-		/// 清单里的实体可能已经被游戏删掉，所以每条都先做存在性检查：
-		/// 优先标它的 owner（LaneOverlapSystem 的重建闸门要的是带 SubLane 的 owner），
-		/// 没有 Owner 组件就直接标车道自己（对闸门没用，但对车道 flags 两趟刷新有意义，
-		/// 而且绝无害——Updated 会被 CleanUpSystem 在帧末摘掉）。
-		/// 已带 Updated 的跳过：ECB 帧末回放时重复 AddComponent 是不能赌的语义。
+		/// 清单里的实体已经在**主线程**被 <see cref="RestoreJudgment.ChooseRestoreTarget"/>
+		/// 过过一遍（P2 遗留，2026-10-13 收尾补丁）：死实体在 ECB 回放前就挡住了，
+		/// owner/车道的选型也已经落成具体实体写进清单，这里只剩"已带 Updated 的跳过"这一件
+		/// 事实要查（ECB 帧末回放时重复 AddComponent 是不能赌的语义）。
+		/// 因此本 job 不再持有 <c>ComponentLookup&lt;Owner&gt;</c>——主线程拿不到的事实，
+		/// 一个 job 更拿不到，把它留在 job 里只是给"看起来做了存在性检查"的错觉。
 		/// </summary>
 		[BurstCompile]
 		private struct MarkUpdatedTargetedJob : IJob
@@ -2454,9 +2485,6 @@ namespace AccessAnarchy.Systems
 			[ReadOnly]
 			public ComponentLookup<Updated> m_UpdatedData;
 
-			[ReadOnly]
-			public ComponentLookup<Owner> m_OwnerData;
-
 			public EntityCommandBuffer.ParallelWriter m_Ecb;
 
 			/// <summary>本批 ECB 命令的排序键基址（见 kSortKeyRestoreTargeted）。</summary>
@@ -2464,13 +2492,8 @@ namespace AccessAnarchy.Systems
 
 			public void Execute()
 			{
-				foreach (Entity lane in m_Targets)
+				foreach (Entity target in m_Targets)
 				{
-					Entity target = lane;
-					if (m_OwnerData.TryGetComponent(lane, out Owner owner) && owner.m_Owner != Entity.Null)
-					{
-						target = owner.m_Owner;
-					}
 					if (!m_UpdatedData.HasComponent(target))
 					{
 						m_Ecb.AddComponent<Updated>(m_SortKeyBase, target);

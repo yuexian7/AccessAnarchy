@@ -115,6 +115,7 @@ if (fs.existsSync(PRODUCT)) {
   const literals = [
     "Access set audit", "Stripped-lane ledger", "Restore baseline:",
     "self-heal", "real leak", "enough via",
+    "Restore targeted: skipped", // P2：陈旧实体过滤（标记后立刻拆路再关模组）
   ];
   for (const lit of literals) {
     if (dllHas(buf, lit)) ok(`字面量「${lit}」在位`);

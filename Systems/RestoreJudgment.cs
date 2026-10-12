@@ -3,20 +3,20 @@ using System;
 namespace AccessAnarchy.Systems
 {
     /// <summary>
-    /// v0.8.11 收尾补丁（2026-10-13 第四轮复查）：把三处**纯判据**从 <see cref="AccessZoneOverlapSystem"/>
+    /// v0.8.11 收尾补丁（2026-10-13 第四轮复查 + P2 遗留）：把四处**纯判据**从 <see cref="AccessZoneOverlapSystem"/>
     /// 里抽出来放在这里——这个类一个游戏类型都不碰（硬约束，见 <c>tests\t3\T3.csproj</c> 的注释：
     /// 一旦有人往这里加一句 `Unity.Mathematics.math` 或 `ComponentLookup`，离线壳会直接编译失败，
     /// 而不是静默把覆盖降级掉）。
     ///
-    /// 为什么值得单独成文件：这一版的四处改动全部是"判据算术"（恢复判据双尺子 / 心跳上报节奏 /
-    /// 漏口自愈计数），而它们此前只能靠 4.5 小时的实机会话去验。第四轮复查就是在 ledger 那一格里
-    /// 找到两个方向都反的缺陷（大清单每心跳重复、小清单打完 0 之后永远沉默），这种形状用
-    /// 真值表 0.1 秒就能钉死，不该占用实机轮次。
+    /// 为什么值得单独成文件：这一版的改动全部是"判据算术"（恢复判据双尺子 / 心跳上报节奏 /
+    /// 漏口自愈计数 / 定向恢复标的选型），而它们此前只能靠 4.5 小时的实机会话去验。第四轮复查就是在
+    /// ledger 那一格里找到两个方向都反的缺陷（大清单每心跳重复、小清单打完 0 之后永远沉默），
+    /// 这种形状用真值表 0.1 秒就能钉死，不该占用实机轮次。
     ///
     /// 同一份源文件被模组 csproj（默认通配 `Systems\**\*.cs`）与 `tests\t3\T3.csproj`
     /// （`<Compile Include>`）两边编，不存在"两份拷贝漂移"这个最大的假绿来源。
-    /// 阈值常量在这里是**唯一真源**，系统里的 `kRestoreMinRecover / kTrackedLogMin /
-    /// kTrackedLogShift / kSetLeakConfirm` 只是指向它们的别名。
+    /// 阈值常量在这里是**唯一真源**；系统里如今只剩 `kSetLeakConfirm` 一个别名（它要在
+    /// `<see cref>` 与日志插值里被引用），其余常量在系统侧直接用本类全名。
     /// </summary>
     internal static class RestoreJudgment
     {
@@ -130,5 +130,41 @@ namespace AccessAnarchy.Systems
         {
             return seen >= SetLeakConfirm;
         }
+
+        /// <summary>
+        /// 定向恢复标的的选型（P2 遗留 + 2026-10-13 收尾补丁）。判断规则见
+        /// <see cref="RestoreTargetChoice"/> 的注释；三个输入是主线程在 WaitForJobs() 之后采的
+        /// 可信事实（EntityManager.Exists 按 index+version 判），所以这张真值表可以被离线壳整条钉死。
+        /// </summary>
+        internal static RestoreTargetChoice ChooseRestoreTarget(bool laneExists, bool hasOwnerRef, bool ownerExists)
+        {
+            if (!laneExists)
+            {
+                return RestoreTargetChoice.Skip;
+            }
+            if (!hasOwnerRef)
+            {
+                return RestoreTargetChoice.Lane;
+            }
+            return ownerExists ? RestoreTargetChoice.Owner : RestoreTargetChoice.Lane;
+        }
+    }
+
+    /// <summary>
+    /// 定向恢复里"这个标的要不要标、标在哪"（P2 遗留 + 2026-10-13 收尾补丁）。
+    /// 陈旧实体问题的根因：`m_WrittenLanes` 是跨帧累计的（入口处进图时就在记），
+    /// 玩家"标记后立刻拆路/拆建筑"再关模组，清单里就是一堆死引用；直接把死引用投进 ECB，
+    /// 帧末回放对不存在实体做操作是 SDK 不保证的行为（轻则游戏打一条 Critical、重则整批回放中断）。
+    /// <see cref="RestoreJudgment.ChooseRestoreTarget"/> 的三个输入都是主线程在 `WaitForJobs()`
+    /// 之后采的**可信事实**（EntityManager.Exists 按 index+version 判，不是"看起来还在"）：被删的
+    /// 车道直接放弃；车道活着但没有可用的 Owner ⇒ 标车道自己；Owner 已被拆 ⇒ 退回标车道自己。
+    /// 唯一没被覆盖的窗口是"过滤后、帧末回放前"被同帧拆除——那是游戏自己的拆除序列，与本模组无关，
+    /// 而且现实中一次模拟步内先拆后开关的概率趋近于零。
+    /// </summary>
+    internal enum RestoreTargetChoice
+    {
+        Skip,
+        Lane,
+        Owner,
     }
 }

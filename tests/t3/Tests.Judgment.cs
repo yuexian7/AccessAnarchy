@@ -20,6 +20,7 @@ namespace AccessAnarchy.T3
             LedgerTrigger();
             LedgerProperties();
             LeakStreak();
+            RestoreTarget();
         }
 
         private static void Constants()
@@ -196,6 +197,35 @@ namespace AccessAnarchy.T3
             seen = RestoreJudgment.NextLeakStreak(false, seen);
             seen = RestoreJudgment.NextLeakStreak(true, seen);
             Check.Equal("交错：残留-干净-残留 不触发自愈", false, RestoreJudgment.LeakHealDue(seen));
+        }
+
+        private static void RestoreTarget()
+        {
+            Check.Section("定向恢复标的选型 ChooseRestoreTarget（P2 遗留：陈旧实体不能投进 ECB）");
+            // 现实里能出现的形态（主线程在 WaitForJobs 之后采的事实，按 index+version 判存在性）
+            Check.Equal("车道已删 → 放弃", RestoreTargetChoice.Skip, RestoreJudgment.ChooseRestoreTarget(false, false, false));
+            Check.Equal("车道已删、Owner 引用还记着 → 仍放弃（车道死了一切免谈）", RestoreTargetChoice.Skip, RestoreJudgment.ChooseRestoreTarget(false, true, true));
+            Check.Equal("车道活着、没有 Owner → 标车道自己", RestoreTargetChoice.Lane, RestoreJudgment.ChooseRestoreTarget(true, false, false));
+            Check.Equal("车道活着、Owner 已被拆 → 退回标车道自己", RestoreTargetChoice.Lane, RestoreJudgment.ChooseRestoreTarget(true, true, false));
+            Check.Equal("车道活着、Owner 也活着 → 标 Owner", RestoreTargetChoice.Owner, RestoreJudgment.ChooseRestoreTarget(true, true, true));
+            // 传参矛盾形态（主线程不可能产生，但函数不能靠"调用者一定对"来保证安全）
+            Check.Equal("没有 Owner 引用却传 ownerExists → 仍标车道", RestoreTargetChoice.Lane, RestoreJudgment.ChooseRestoreTarget(true, false, true));
+
+            // 全 8 种输入的三条不变量
+            for (int i = 0; i < 8; i++)
+            {
+                bool laneExists = (i & 1) != 0;
+                bool hasOwnerRef = (i & 2) != 0;
+                bool ownerExists = (i & 4) != 0;
+                RestoreTargetChoice got = RestoreJudgment.ChooseRestoreTarget(laneExists, hasOwnerRef, ownerExists);
+                // ① 车道死了就必须 Skip：ECB 对死实体操作是 SDK 不保证的行为，任何"试试看"都不行
+                Check.Equal("车道已死 ⇒ Skip（输入 " + i + "）", !laneExists, got == RestoreTargetChoice.Skip);
+                // ② Owner 只有在三条件齐全时才出现
+                Check.Equal("Owner 需三条件齐全（输入 " + i + "）", laneExists && hasOwnerRef && ownerExists, got == RestoreTargetChoice.Owner);
+                // ③ 降级链：owner 从活变死，结果只能 Owner → Lane，绝不能退到 Skip（车道不能因为 owner 死了而丢失）
+                RestoreTargetChoice degraded = RestoreJudgment.ChooseRestoreTarget(laneExists, hasOwnerRef, false);
+                Check.True("owner 死了也不丢车道（输入 " + i + "）", !laneExists || degraded != RestoreTargetChoice.Skip);
+            }
         }
     }
 }

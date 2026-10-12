@@ -4,7 +4,7 @@
 	<!--首发成功（2026-09-12，Unlisted）：ModId 158842。此后重传二进制一律用 PublishNewVersion，别用 Update（会烧版本号）。-->
 	<ModId Value="158842" />
 	<ForumLink Value="" />
-	<ModVersion Value="0.8.10" />
+	<ModVersion Value="0.8.11" />
 	<!--v0.8.10 发布：这一行与下面的 <ChangeLog> **成对**改掉，此前一直故意留在旧版本
 	    （v0.8.1 那次提前改了 ModVersion 而 ChangeLog 还挂着 0.8.0 正文，差点在线上把旧日志再推一遍）。
 	    发布前的固定动作仍然有效：①先回读线上、把作者手改过的字段回填进来（FillPublishMetadata 每次全量重推
@@ -32,7 +32,7 @@
 	<ExternalLink Type="x" Url="https://x.com/yuexian777/status/2101942150447702427?s=20" />
 	<!--Change log for NEW VERSION ONLY（线上 changelog 是「一个平台版本一条条目」，条目日期＝该版本发布时间，所以正文里绝不能夹带历史版本的日志；历史条目平台不提供改写，Update/Patch 请求也不携带 changelogEntry，只有 NewVersion 会带）。正文用元素形式、行首不缩进，`- ` 项目符号 + 空行才会被渲染成多行（写成连续行会被压成一整段）。-->
 	<ChangeLog>
-v0.8.10
+v0.8.11
 
 1. Improved: turning the mod off now restores vehicle yielding to pedestrians without reloading the save, even if the game has been updated and the mod can no longer ask the game for a full rebuild. It also no longer has to mark the entire road network for recalculation, so switching the mod off is much less likely to freeze the game.
 

@@ -93,7 +93,7 @@ v0.8.5 起「仅出入口区域」的覆盖面补上了一类漏判：仓库、�
 
 判断"到底是不是漏删"的唯一硬证据是日志（不要靠肉眼猜）：`Access set audit: …`、`Global sweep driver: …`，与全局模式下的 `Overlap coverage (global): … street & intersection lanes X of Y hold Z …`。**Z=0 就说明路口车道的行人条目确实一条都不剩**，车还停就是上表那几类原因；Z 连续两次心跳都非零，才轮到把它当本模组的缺陷来查（把日志发来，v0.8.7 起这条读数后面还会跟最多 3 行 `Overlap leak sample:`，直接给出漏的是哪条车道、在地图哪个坐标、指向哪种对端车道）。
 
-v0.8.11 起出入口模式的 `Access set audit` 换成**与剥离动作同一把尺子**数（市政道路上按设计保留的人行横道条目不再算进"残留"），所以这行现在正常就该是 0；万一真的读到残留，连续两次相同读数就会触发一次当场补剥（日志跟一行 `Access set audit: the leak survived 2 consecutive readings - re-stripped the whole vehicle set now (self-heal…)`），不用等整轮重建兜底。
+v0.8.11 起出入口模式的 `Access set audit` 换成**与剥离动作同一把尺子**数（市政道路上按设计保留的人行横道条目不再算进"残留"），两个数 X/Y 现在**都是**这把尺子读出来的，所以干净稳态就应该是 `0 of 3227 vehicle lanes still hold 0 pedestrian overlap entries`——X 或 Y 任一非零才是真漏口（v0.8.11 第一版只换了 Y 那一格，X 仍会把"挂着设计保留横道条目"的车道数算进来，读成"787 条车道仍然挂着 0 条条目"这种自相矛盾的行，收尾补丁已把两格对齐）。万一真的读到残留，**连续两次读数非零**（不要求两次数值相同）就会触发一次当场补剥（日志跟一行 `Access set audit: the leak survived 2 consecutive readings - re-stripped the whole vehicle set now (self-heal…)`），不用等整轮重建兜底；自愈最快约 30~64 秒一次（取决于审计自己的降频与玩家的模拟速度档）。
 
 v0.8.10 起这两类读数由**同一遍**扫描算出（此前出入口模式与全局模式各扫一遍，同一次心跳付两笔全量扫描），所以每次读数少一半卡顿；两个数字现在也同源，不会互相矛盾。
 
@@ -123,7 +123,7 @@ v0.8.10 起这两类读数由**同一遍**扫描算出（此前出入口模式�
 4. 修改车辆碰撞/推挤逻辑的模组（取消碰撞、车辆互穿一类）：与本模组改的是不同数据（本模组不碰 `CarLaneFlags.PushBlockers` 与物理碰撞），可叠加，但两者同时开时"车不让人 + 车不让人 + 行人本体在车道上也不减速"会叠加成完全无碰撞，事故/穿模观感会更强。
 5. 大幅提高道路限速的模组：车辆 AI 本身会失真甚至卡死——这是原版运动学模型的上限（每条模拟步的位移长度就是车速、过路口时原版还主动把加减速上限抬到 1000 km/h，机制见 `归档-版本史.md` §⑰），与本模组改的数据无关。
 
-判断"是不是本模组导致的"，用日志而不是猜：`Rebuild gate:`、`Anchor grid:`、`Access set audit:`、`Overlap coverage (global):`、`Global sweep driver:` 五行能说明模组到底改了多少数据、有没有跟丢。
+判断"是不是本模组导致的"，用日志而不是猜：`Rebuild gate:`、`Anchor grid:`、`Access set audit:`、`Overlap coverage (global):`、`Global sweep driver:` 五行能说明模组到底改了多少数据、有没有跟丢。关掉功能后"车辆没恢复让行"另看两行：`Restore baseline:`（关闭那一刻实测还剩多少条目，是恢复判据的第二把尺子）与 `Restore check #N …`（末尾会写明成立的是哪条腿：`enough via baseline80(...)` 或 `disable-delta(+N/M)`）；`Stripped-lane ledger:` 则说明定向恢复要标多少条车道。
 
 ## 卸载安全（长期约束，每个新功能都要过这条）
 

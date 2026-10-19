@@ -3,7 +3,7 @@
  * Access Anarchy 离线门禁（开发技能 §8：能在下层测出来的绝不带到上层）。
  *
  * 用法：
- *   node scripts/verify.mjs                 完整：版本一致性 → T1 构建 → T2 产物字面量 → T3 回归壳 → 发布素材
+ *   node scripts/verify.mjs                 完整：版本一致性 → T1 构建 → T2 产物字面量 → T3 回归壳 → 发布素材 → PDB 卫生
  *   node scripts/verify.mjs --t3-only       只跑 T3（不开游戏、不构建模组，约 2 秒）
  *   node scripts/verify.mjs --skip-build    跳过 dotnet build，直接扫上一次构建的产物
  *
@@ -191,6 +191,31 @@ for (const s of shots) {
 }
 if (fs.existsSync(path.join(ROOT, "bin", "Release", "net48", "0Harmony.dll"))) bad("产物里出现了 0Harmony.dll——本模组是零 Harmony 路线，不该有它");
 else ok("零 Harmony：产物里没有 0Harmony.dll");
+
+/* ---------- 6. 托管 PDB 卫生（路径泄露归零，行号定位能力保留） ---------- */
+// 玩家报错日志里那串「D:\WorkSpace\CS2MOD\AccessAnarchy\...」不是玩家磁盘上的路径，
+// 而是编译期烙进 AccessAnarchy.pdb 的源文件路径——DeployWIP 把 OutDir 全量复制进
+// 部署目录、发布原样上传，玩家侧 Mono 按 PDB 文档表打印「路径:行号」（与玩家磁盘无关）。
+// csproj 用 PathMap 把工程根重映射成中性前缀 /src：文件名与行号原样保留（崩溃按行号
+// 定位的能力不丢），只有绝对路径前缀变成中性。SourceLink（SDK 默认开）会把仓库
+// URL+commit 一起烙进 PDB，模组发布用不上，已在 csproj 关掉。
+// 三平台原生产物里残留的 C:\Users\<用户名>\... 由 Burst 链接器写入，工具链行为，本项目
+// 不改（只进崩溃 dump 的符号化路径，不进 Player.log）。详见 开发笔记 §1。
+if (fs.existsSync(path.join(ROOT, "bin", "Release", "net48", "AccessAnarchy.pdb"))) {
+  section("6. 托管 PDB 卫生（路径泄露归零，行号定位能力保留）");
+  const pb = fs.readFileSync(path.join(ROOT, "bin", "Release", "net48", "AccessAnarchy.pdb"));
+  // 对照探针：源文件名必须还在（证明 PDB 仍带源文档、行号表没被一并清掉；扫不到 = 假绿）
+  if (!dllHas(pb, "AccessZoneOverlapSystem.cs")) bad("对照探针缺失：源文件名都扫不到 = PDB 被清空/路径找错，本轮泄露判定不可信");
+  else ok("对照探针「AccessZoneOverlapSystem.cs」在位（源文档与行号表健在）");
+  // 禁止随包上传的机器专属串：编译期绝对路径、用户名、SourceLink 仓库 URL 一律归零
+  const forbidden = ["WorkSpace", "CS2MOD", "Users\\", "10975", "raw.github", "githubusercontent"];
+  const leaked = forbidden.filter(f => dllHas(pb, f));
+  if (leaked.length) bad(`托管 PDB 仍带机器专属串：${leaked.join("、")}（玩家日志会泄露作者磁盘布局——检查 csproj 的 PathMap/SourceLink）`);
+  else ok("托管 PDB 已无机器专属串（WorkSpace/用户名/仓库 URL 均归零）");
+} else if (!SKIP_BUILD) {
+  section("6. 托管 PDB 卫生");
+  bad(`找不到托管 PDB：bin\\Release\\net48\\AccessAnarchy.pdb（构建没出调试符号？检查 csproj 的 DebugType）`);
+}
 
 console.log("\n----");
 if (failures === 0) console.log("门禁全绿 ✓");

@@ -11,6 +11,25 @@
 	<Import Project="$([System.Environment]::GetEnvironmentVariable('CSII_TOOLPATH', 'EnvironmentVariableTarget.User'))\Mod.props" />
 	<Import Project="$([System.Environment]::GetEnvironmentVariable('CSII_TOOLPATH', 'EnvironmentVariableTarget.User'))\Mod.targets" />
 
+	<!--
+	  调试符号卫生（作者 2026-10-19 问：为什么玩家报错日志里显示的是我电脑上的路径？）。
+	  机制链条：DeployWIP 把 $(OutDir) 全量复制进部署目录，发布内容 = Mods\<模组名>\ 原样，
+	  所以托管 AccessAnarchy.pdb 一定随包上传；玩家侧 Mono 解析堆栈时按 PDB 文档表打印
+	  「源文件路径:行号」，打印的是**编译期**烙进 PDB 的路径，跟玩家磁盘无关。
+	  PathMap 把工程根重映射成中性前缀 /src：文件名与行号原样保留（崩溃按行号定位的能力不丢），
+	  只有绝对路径前缀变成中性——本次线上崩溃能对上 :1981/:1696/:1145 靠的就是行号。
+	  SourceLink 实测是 SDK 默认开启（EnableSourceLink / EnableSourceControlManagerQueries 都是 true），
+	  它会把仓库 URL + commit 一起烙进 PDB，模组发布用不上，关掉。
+	  本机调试想看真实路径：dotnet build -p:PathMap=
+	  已知限制：三平台原生产物与 win_x86_64.pdb 里的 C:\Users\<用户名>\... 由 Burst 链接器写入，
+	  工具链行为，本项目不改（不会出现在 Player.log，只在崩溃 dump 符号化时可见）。
+	-->
+	<PropertyGroup>
+		<PathMap>$(MSBuildProjectDirectory)=/src</PathMap>
+		<EnableSourceLink>false</EnableSourceLink>
+		<EnableSourceControlManagerQueries>false</EnableSourceControlManagerQueries>
+	</PropertyGroup>
+
 	<ItemGroup>
 		<!--
 		  本机没有 net48 目标包（无 Visual Studio），此包只提供编译期参考程序集，PrivateAssets=all 保证不进产物。

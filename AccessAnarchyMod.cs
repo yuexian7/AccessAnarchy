@@ -32,8 +32,64 @@ namespace AccessAnarchy
 		/// 按开关次数线性增长。官方模板是普遍缺陷，这里按卸载安全优先的原则做得更严。</summary>
 		private (string locale, LocaleSource source)[] m_LocaleSources;
 
+		/// <summary>v0.8.11：日志文件当前写不进去，就把这个模组的诊断改投游戏默认 handler（Player.log）。
+		///
+		/// 玩家报障的那条堆栈（`NullReferenceException ... AccessZoneOverlapSystem.ReportOverlapCoverage()`
+		/// 一路到 `OnUpdate()`）不是模组的空引用：`ReportOverlapCoverage` 里那句是 `log.Info(line)`，
+		/// 空的是**框架内部的写流对象**。反编译 Colossal.Logging.dll 核实的路径是：
+		/// `UnityLogger.Open()` 用 `try { new FileStream(...) } catch { Close(); }` 包住建流，
+		/// 而 `Close()` 的守卫是 `if (isOpen)`、`isOpen` 又是 `m_Stream != null &amp;&amp; m_StreamWriter != null`——
+		/// 于是**建流失败时 Close() 什么都不做**，`m_StreamWriter` 留在 null；下一次写日志
+		/// `Internal_WriteStream` 第一句就是 `m_StreamWriter.SetSourceAndStd(...)` → NRE（:318），
+		/// 而那里的 `catch (IOException)` 接不住它，`Open()` 也压根在 try 外面。
+		/// `isOpen` 恒为 false ⇒ **此后每一条日志都重开、再失败、再抛**，所以是成串刷而不是只出现一次；
+		/// 异常被 `CustomLogHandler.LogFormat` 的 `catch (Exception)` 吞掉（功能不受影响），
+		/// 但它顺手把这条 NRE 送进 Unity 默认 handler，于是玩家的 Player.log 里全是我们的堆栈。
+		///
+		/// 触发条件全在玩家环境侧（日志文件被日志查看器/加速器占着、OneDrive 同步中、杀软锁定、只读、权限被改），
+		/// 模组这边没有可改的错；但「看起来是这个模组在刷异常」必须消掉。
+		///
+		/// 修法只读框架自带的降级开关，不抢补丁也不吞日志：`redirectToDefault = true` 之后
+		/// `CustomLogHandler.PostProcessFormat` 会在 `!LogManager.stdOutActive` 时**在 `Internal_WriteStream`
+		/// 之前** return，坏流再不被触碰；同时它仍把 `[AccessAnarchy.AccessAnarchyMod] 正文` 写进默认 handler
+		/// ⇒ 诊断搬去 Player.log，一条不少，只是换个地方。刻意**不**动 `effectivenessLevel`（那等于关掉日志）。
+		///
+		/// 判据与副作用分开：能不能写由 <see cref="LogFileGuard"/> 决定（纯 BCL，tests\t3 离线钉回归），
+		/// 这里只负责改开关和发那句兜底警告。探查用 Append 不截断，绝不可能清空玩家已有的日志。</summary>
+		private static void EnsureLogUsable()
+		{
+			string logPath = null;
+			try
+			{
+				logPath = log.logPath;
+			}
+			catch (Exception)
+			{
+				// 取不到路径也照样走降级：宁可日志搬家，也不让框架去踩那条会抛 NRE 的坏路径。
+			}
+
+			if (LogFileGuard.Check(logPath) == LogFileGuard.Writable)
+			{
+				return;
+			}
+
+			log.redirectToDefault = true;
+			try
+			{
+				log.Warn($"Access Anarchy: the mod log file is not writable right now ({logPath}). Most likely another program is holding it open (log viewer, overlay/accelerator, OneDrive sync, antivirus) or the folder is not writable. Switching this mod's diagnostics to the game's default log (Player.log) for this session; gameplay is not affected and no log data was deleted.");
+			}
+			catch (Exception)
+			{
+				// 兜底那句本身也绝不允许打断 OnLoad。开关已经改好了，这里静默是可接受的。
+			}
+		}
+
 		public void OnLoad(UpdateSystem updateSystem)
 		{
+			// v0.8.11：必须排在 OnLoad 第一句——它要在**本模组第一次写日志之前**把坏流绕开，
+			// 否则紧接着的版本横幅就会打出第一条 NRE（框架的失败是自锁的，之后再也恢复不了）。
+			EnsureLogUsable();
+
 			log.Info($"Access Anarchy v{ModInfo.kVersion} loading (native-crash hardening: own job chain instead of Dependency, world caches reset on preload; scope merged into one switch; performance: anchors collected from vehicle lanes only, access-zone rebuild only when something changed, idle steps leave before touching the barrier, global re-strip throttled to one pass per change; correctness: rebuilt pedestrian lanes re-strip the vehicle lane paired with them, cargo connections counted as vehicle lanes in both modes, crosswalk entries decided per lane ownership, global mode now re-applies after paused windows where the game rebuilt overlaps while we were not stepping; copy: the road speed-limit warning is gone from all 12 toggle descriptions because that failure is vanilla kinematics, not this mod; v0.8.9 churn gate: entity-count wobble no longer drives whole-city re-strip or access-zone rounds)...");
 			if (GameManager.instance.modManager.TryGetExecutableAsset(this, out var asset))
 			{

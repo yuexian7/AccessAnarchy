@@ -35,10 +35,13 @@
     <ItemGroup>
         <!-- 被测源码：与模组 csproj 同一份文件。加新文件前先确认它一个游戏类型都不碰。 -->
         <Compile Include="..\..\Systems\RestoreJudgment.cs" />
+        <!-- v0.8.11：日志自保闸。纯 BCL（System.IO），同样一个游戏类型都不碰。 -->
+        <Compile Include="..\..\Systems\LogFileGuard.cs" />
         <!-- 壳自身 -->
         <Compile Include="Program.cs" />
         <Compile Include="Check.cs" />
         <Compile Include="Tests.Judgment.cs" />
+        <Compile Include="Tests.LogGuard.cs" />
     </ItemGroup>
 
 </Project>

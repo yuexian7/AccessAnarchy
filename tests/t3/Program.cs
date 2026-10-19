@@ -52,6 +52,7 @@ namespace AccessAnarchy.T3
             }
 
             TestsJudgment.Run();
+            TestsLogGuard.Run();
 
             Check.DumpFailures();
             Console.WriteLine("TOTAL " + Check.Total + " PASS " + Check.Pass + " FAIL " + Check.Fail);

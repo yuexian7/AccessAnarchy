@@ -116,6 +116,7 @@ if (fs.existsSync(PRODUCT)) {
     "Access set audit", "Stripped-lane ledger", "Restore baseline:",
     "self-heal", "real leak", "enough via",
     "Restore targeted: skipped", // P2：陈旧实体过滤（标记后立刻拆路再关模组）
+    "the mod log file is not writable right now", // v0.8.11：日志自保闸降级（Player.log 里应看到这句而不是成串 NRE）
   ];
   for (const lit of literals) {
     if (dllHas(buf, lit)) ok(`字面量「${lit}」在位`);
@@ -133,13 +134,21 @@ if (fs.existsSync(PRODUCT)) {
 section("4. T3 纯判据回归壳（零游戏 DLL / 零联网 / 不开游戏）");
 const SHELL = path.join(ROOT, "tests", "t3", "T3.csproj");
 const SHELL_EXE = path.join(ROOT, "tests", "t3", "bin", "Release", "net48", "AccessAnarchy.T3.exe");
+let shellBuilt = false;
 try {
   execFileSync("dotnet", ["build", SHELL, "-c", "Release", "--nologo"], { cwd: ROOT, encoding: "utf8", stdio: "pipe" });
-  ok("壳构建通过（RestoreJudgment.cs 确实一个游戏类型都不碰）");
+  shellBuilt = true;
+  ok("壳构建通过（被测的 Systems\\*.cs 确实一个游戏类型都不碰）");
 } catch (e) {
-  bad("壳构建失败——多半是有人往 Systems/RestoreJudgment.cs 里加了游戏类型：" + String(e.stdout || e.message).split("\n").slice(-4).join(" / "));
+  // 直接把 error 行端出来：只打末尾几行时能看到"6 个错误"却看不到是哪 6 条（2026-10-19 踩过）。
+  const txt = String(e.stdout || "") + "\n" + String(e.stderr || "") + "\n" + String(e.message || "");
+  const errs = txt.split(/\r?\n/).filter(l => /error CS\d+|个错误/.test(l)).slice(0, 8);
+  bad("壳构建失败——多半是有人往 Systems/RestoreJudgment.cs 或 Systems/LogFileGuard.cs 里加了游戏类型，或壳自身语法错：" + (errs.join(" | ") || txt.split(/\r?\n/).slice(-4).join(" / ")));
 }
-if (fs.existsSync(SHELL_EXE)) {
+if (!shellBuilt) {
+  // 假绿比没壳更危险：编译都失败了还去跑上一次留下的 exe，报出来的"全绿"是旧源码的成绩。
+  bad("壳构建失败，本轮**不运行**旧产物（上一次的 exe 全绿不代表现在的源码全绿）");
+} else if (fs.existsSync(SHELL_EXE)) {
   let out = "";
   let code = 0;
   try {

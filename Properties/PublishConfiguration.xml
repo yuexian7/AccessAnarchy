@@ -11,7 +11,7 @@
 	    displayName/short/long/tags/thumbnail/screenshots/acl/externalLinks）；②ModVersion；③ChangeLog
 	    换成新的英中双语正文（中文以作者口述为准，逐字照搬）。
 	    ⚠ 发布前必须先关掉游戏，否则 ModPublisher 会锁住正在使用的产物文件。-->
-	<!--线上 requiredVersion 就是这个值；本机游戏 bundleVersion 实测 1.6.0f1（Unity 2022.3.71f1）-->
+	<!--线上 requiredVersion 就是这个值；本机游戏 bundleVersion 实测 1.6.2f1 (767.21d1) [6300.26419]（Unity 2022.3.71f1，10-20 由 SceneFlow.log 版本行核实）-->
 	<GameVersion Value="1.6.*" />
 	<AccessLevel Value="Public" />
 	<DisplayName Value="Access Anarchy" />
@@ -22,9 +22,17 @@
 	    所以直接放作者做的 1254x1254 方图、不做裁切不加边框。旧的 950x500 是 research/ThumbGen 自造的占位图，
 	    v0.7.8 发布时它把网页端上传的方图封面覆盖掉了——别再把它生成回来。-->
 	<Thumbnail Value="Properties/Thumbnail.jpg" />
-	<!--线上现有 2 张网页端上传截图的本地备份（源文件只有 research/platform_media/ 里的下载件，research/ 不进 git 但发布在本机跑、路径能找到）。FillPublishMetadata 每次全量重推 screenshots，删了这两行线上截图会被清空。-->
-	<Screenshot Value="research/platform_media/screenshot_6.jpg" />
+	<!--截图：SDK 会把这里按顺序重命名成 screenshot_01..N **全量提交**（ModsPublishingService.cs:536），
+	    没有「保持线上不变」这个选项 ⇒ 这里少写一条，线上就少一张。
+	    2026-10-21 回读线上为 4 张，按当时的显示顺序：①模组设置页（网页端上传，图内 "Mod version" 仍写 0.8.9）
+	    ②screenshot_02 ③雪景停车场实机图（网页端上传）④screenshot_03。
+	    本地对应：screenshot_11_settings_089.png / screenshot_7.jpg（screenshot_02 的源件）/
+	    screenshot_12_snow_parking.jpg / screenshot_8_rainbow.jpg（screenshot_03 的源件）。
+	    ⚠ screenshot_6.jpg 是更早那批的第 1 张，线上 10-08 已不存在——别再放回来，否则等于把它复活。
+	    research/ 不进 git，但发布在本机跑、路径能找到。--> 
+	<Screenshot Value="research/platform_media/screenshot_11_settings_089.png" />
 	<Screenshot Value="research/platform_media/screenshot_7.jpg" />
+	<Screenshot Value="research/platform_media/screenshot_12_snow_parking.jpg" />
 	<Screenshot Value="research/platform_media/screenshot_8_rainbow.jpg" />
 	<Tag Value="Code Mod" />
 	<ExternalLink Type="github" Url="https://github.com/yuexian7/AccessAnarchy" />
@@ -34,30 +42,34 @@
 	<ChangeLog>
 v0.8.11
 
-1. Improved: turning the mod off now restores vehicle yielding to pedestrians without reloading the save, even if the game has been updated and the mod can no longer ask the game for a full rebuild. It also no longer has to mark the entire road network for recalculation, so switching the mod off is much less likely to freeze the game.
+1. Improved: turning the mod on and off is now more stable, and the mod's self-check uses consistent counting rules.
 
-2. Improved: in "All roads (global)" mode, bicycles, trams and trains no longer make vehicles yield to pedestrians either - everything that can yield to pedestrians is now covered, as the mode name promises.
+2. Improved: in "All roads (global)" mode, trams and trains no longer make vehicles yield to pedestrians either.
 
-3. Optimized: the mod's own diagnostics now scan the city once per heartbeat instead of twice, halving the occasional 10-40 ms hitch while building.
+3. Improved: the scanning mechanism has been reworked, reducing the occasional hitch while building.
 
-4. Fixed: repeatedly enabling and disabling the mod in the mod manager no longer leaves stale translation data behind.
+4. Improved: the mod is now more reliable during the game's autosave.
 
-5. Fixed a few rare cases where the mod could report an error while being closed or when its settings page was opened very early.
+5. Fixed: when the log file could not be written because another program had locked it, the mod reported a string of NullReferenceException errors.
 
-6. Adjusted some text descriptions.
+6. Fixed a few rare cases where the mod could report an error.
+
+7. Adjusted some text descriptions.
 
 中文
 
-1. 改进：关掉模组后，车辆对行人的避让会自动恢复，**不需要退出重进存档**；即使游戏更新后模组已经没法再请游戏整体重算，它也能自己恢复。恢复时也不再需要把整张路网全部标记重算，关开关卡住的概率和卡顿幅度都小得多。
+1. 提升了模组开启和关闭的稳定性，统一模组的自检统计口径。
 
-2. 改进：「全部道路（全局）」模式下，自行车道、有轨电车道、铁路等同样不再让行人——所有会避让行人的车道现在都覆盖到了，和这个模式的名字一致。
+2. 「全部道路（全局）」模式现在有轨电车道和铁路也不再避让行人。
 
-3. 优化：模组自己的诊断信息每个心跳只扫全城一次（之前两次），施工期偶发的 10~40 毫秒卡顿减半。
+3. 改进了扫描机制，降低建造时偶发的卡顿。
 
-4. 修复：在模组管理器里反复关闭再打开模组，不再残留多余的翻译数据。
+4. 提升了游戏自动保存期间的稳定性。
 
-5. 修复：模组卸载过程中、选项页面极早被打开的少数情况下，可能出现一条属于本模组的报错。
+5. 修复日志文件被其他程序占用导致写入失败时连续报出一串 NullReferenceException 的问题。
 
-6. 调整了部分文本说明。
+6. 修复了模组少数情况下可能出现的报错。
+
+7. 调整了部分文本说明。
 	</ChangeLog>
 </PublishConfiguration>

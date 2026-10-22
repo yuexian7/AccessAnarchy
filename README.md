@@ -2,7 +2,7 @@
 
 > 游戏内模组名会按语言显示本地化版本（中文＝出入口无碰撞，12 语对照见 `归档-版本史.md` §⑥）；Paradox Mods 上的显示名始终是 `Access Anarchy`——发布接口只有一个 `displayName`，无法按语言切换。
 
-**都市：天际线 II (Cities: Skylines II) 代码模组 · 适配游戏版本 1.6.0f1 · 零 Harmony 补丁**
+**都市：天际线 II (Cities: Skylines II) 代码模组 · 适配游戏版本 1.6.2f1 · 零 Harmony 补丁**
 
 让车辆在通过停车场、仓库、商场等建筑物的出入口时不再因行人减速停车，直接穿过行人；行人的行走行为、车辆之间的避让完全不受影响。
 
@@ -18,7 +18,7 @@
 
 ## 安装
 
-正式版本：在 Paradox Mods 订阅 [Access Anarchy（ModId 158842）](https://mods.paradoxplaza.com/mods/158842/windows)，当前线上版本 v0.8.9（2026-10-08 发布，平台版本 6）；**本地开发版 v0.8.10 已构建**，按下面的构建命令出包、实测后再上传。
+正式版本：在 Paradox Mods 订阅 [Access Anarchy（ModId 158842）](https://mods.paradoxplaza.com/mods/158842/windows)，当前线上版本 **v0.8.11**（2026-10-21 发布，平台版本 7，适配游戏 1.6.2f1）；本地构建即线上同一份源码，按下面的构建命令出包。
 
 开发构建可部署到下面这个位置（官方工具链 `dotnet build -c Release` 每次自动 Copy output，不需要手工搬）：
 
@@ -104,7 +104,7 @@ v0.8.10 起这两类读数由**同一遍**扫描算出（此前出入口模式�
 - Realistic Path Finding 等改行人寻路的模组不受影响：行人寻路不读取本模组删除的 `LaneOverlap` 数据。
 - v0.8.4 起本模组**不再改动行人车道自己**的重叠数据（人行道、人行横道、建筑的人行大门道）。以前的判定把行人设施误认成"车辆出入口"，可能连带影响红绿灯划分行人相位（`TrafficLightInitializationSystem.cs:515-530` 读的是行人侧缓冲）；现在这类实体一律出局。
 
-**被我们改过的那份数据还有别的读者**——这是"没报错但可能有效果差别"的真正来源，逐条按 1.6.0f1 反编译核对过：
+**被我们改过的那份数据还有别的读者**——这是"没报错但可能有效果差别"的真正来源，逐条按 1.6.2f1 反编译核对过：
 
 | 读者 | 它用这份数据做什么 | 删掉行人条目后会怎样 |
 |---|---|---|
@@ -165,7 +165,9 @@ v0.8.6 新增的 `Overlap coverage` 是**跟着事件走的诊断**：在"首次
 
 v0.8.7 新增的 `Global sweep driver` 同时是性能与正确性的读数：`sweep(s) run` 是全局模式做过几次全城重剥（v0.8.9 后的封顶就是那条兜底——"8192 步且满 30 秒"，作者实机读数 ≈36 秒一次；只有暂停窗口/真正的施工才会加密度），`blind window(s)` 是模组探测到"游戏在跑而我们在暂停"的窗口次数，`re-stripped … entries` 才是这次重剥真正又叫走了多少条——**长期为 0 说明全局模式没有漏口，长期非 0 说明漏口确实存在且已被这条兜底补上**。v0.8.9 起这行还带 `overlap entities X -> Y, gate 256 / 2%` 和 `N check(s) skipped`：Δ 不过门槛就不该有新的 sweep，若门槛挡不住（Δ 一直很大）就说明那批车道真的在被持续改写。⚠ 反过来别把它读反：**Δ=0 而 sweep 仍在慢慢涨是正常的**（那是 8192 步兜底在跑，实机就是 `6751 -> 6751` 配 34 次 skipped 还在起 sweep），漏不漏只看 `re-stripped … entries` 连不连续非 0。
 
-游戏**原生闪退**（不是报错、不是行为异常）时别猜：Windows 的 `%LOCALAPPDATA%\CrashDumps\Cities2.exe.<pid>.dmp` 里有完整转储，本仓库 `node tools/crash-triage.mjs "<dmp 路径>"` 直接给出异常码、被访问地址、故障指令所在的**完整模块路径 + 偏移**、崩溃线程栈上各模块的返回地址计数——判据就一条：栈上有没有 `AccessAnarchy_win_x86_64.dll`。`node tools/pe-func.mjs <RVA>` 再把原版 `lib_burst_generated.dll` 的偏移映射到函数区间。2026-10-07 两次"资产预览即崩"就是这样定性的（两次同一条指令、零命中本模组，详见 `归档-版本史.md` §⑱）。
+游戏**原生闪退**（不是报错、不是行为异常）时别猜：Windows 的 `%LOCALAPPDATA%\CrashDumps\Cities2.exe.<pid>.dmp` 里有完整转储，本仓库 `node tools/crash-triage.mjs "<dmp 路径>"` 直接给出异常码、被访问地址、故障指令所在的**完整模块路径 + 偏移**、崩溃线程栈上各模块的返回地址计数。`node tools/pe-func.mjs <RVA>` 再把原版 `lib_burst_generated.dll` 的偏移映射到函数区间。2026-10-07 两次"资产预览即崩"就是这样定性的（两次同一条指令、故障点就在原版 Burst 函数内，详见 `归档-版本史.md` §⑱）。
+
+⚠ **判据要分崩溃类型，别只会看栈**：堆损坏 / 释放后使用这一类（症状是崩在 `UnityPlayer.dll` 的分配器或链表遍历里、故障地址像 `0x0`+小偏移或 `0xFFFFFFFF` 一类投毒值、托管栈常常整个为空），**肇事点与崩溃点天然分离**，"崩溃线程栈上没有本模组"**不能**用来免责——这条曾被用来免责并被明确推翻。这类崩溃只能靠"崩点是否紧贴我们的写窗口 + 有没有配对的内存序证据"来判断；反过来，崩溃点确实落在我们自己的指令/函数区间内（如 10-07 那两次），才是可以直接定性的。分不清类型时，结论就只能写"证据不足"。
 
 ## 构建
 
@@ -187,7 +189,7 @@ AccessAnarchy/
 ├── Setting.cs                        # 选项面板（ModSetting 框架，中英双语）
 ├── Systems/
 │   └── AccessZoneOverlapSystem.cs    # 核心：删除出入口车道↔行人道的 LaneOverlap
-├── Properties/PublishConfiguration.xml  # Paradox Mods 发布元数据（ModId 158842，Public，线上当前 v0.8.9＝平台版本 6）
+├── Properties/PublishConfiguration.xml  # Paradox Mods 发布元数据（ModId 158842，Public，线上当前 v0.8.11＝平台版本 7）
 ├── research/                         # 开发期反编译调研产物（不参与编译）
 └── template/                         # 官方模组模板副本（不参与编译）
 ```

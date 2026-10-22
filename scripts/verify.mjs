@@ -117,6 +117,14 @@ if (fs.existsSync(PRODUCT)) {
     "self-heal", "real leak", "enough via",
     "Restore targeted: skipped", // P2：陈旧实体过滤（标记后立刻拆路再关模组）
     "the mod log file is not writable right now", // v0.8.11：日志自保闸降级（Player.log 里应看到这句而不是成串 NRE）
+    // v0.8.11：存档窗口护栏（订阅 onGameSaveLoad，存档期间不排任何写 job）。
+    // 三个串分别对应"护栏真的拦过"、"配对事件丢了走兜底"、"压根没订上"三种事后可判的形状；
+    // 缺任何一个，实机验收都只能靠猜。守卫名 onGameSaveLoad 必须能被符号表扫到。
+    "Save guard: skipped", // 正常路径：心跳里报告拦下的步数
+    "Save guard released by timeout after", // 兜底：防永久冻住（存档抛异常时 start:false 不发）
+    "Save guard could not subscribe to onGameSaveLoad", // 订阅失败也要能在日志里看见
+    "no world writes during saves",
+    "onGameSaveLoad", // 事件名（UTF-8 符号堆也能扫到，证明真的接了这个信号）
   ];
   for (const lit of literals) {
     if (dllHas(buf, lit)) ok(`字面量「${lit}」在位`);

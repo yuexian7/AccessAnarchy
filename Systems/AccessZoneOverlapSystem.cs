@@ -7,6 +7,7 @@ using Game;
 using Game.Buildings;
 using Game.Common;
 using Game.Net;
+using Game.SceneFlow;
 using Game.Simulation;
 using Game.Tools;
 using Unity.Burst;
@@ -23,7 +24,7 @@ namespace AccessAnarchy.Systems
 	/// <summary>
 	/// 让车辆在指定范围内不再避让行人（v0.7.0，性能重构）。
 	///
-	/// 机制结论（对 Game.dll 1.6.0f1 反编译核实 + 实机日志验证，详见 开发笔记.md）：
+	/// 机制结论（对 Game.dll 1.6.2f1 反编译核实 + 实机日志验证，详见 开发笔记.md）：
 	/// 车辆"看见"行人的唯一通道是车道的 LaneObject 注册缓冲——CarNavigationSystem 的
 	/// CarLaneSpeedIterator 无论走 CheckCurrentLane（本车道）还是 CheckOverlappingLanes
 	/// （经 LaneOverlap 指向的对端车道），最终都读某个车道的 LaneObject buffer 找行人
@@ -184,7 +185,7 @@ namespace AccessAnarchy.Systems
 	///
 	/// v0.8.7（作者实机两条：①「仅出入口时模组会生效，开启全局后这些设施出入口反倒不生效了」
 	/// ②「有些人行横道确实没生效…附近没有出入口，另外两边的人行横道都生效，就这一边没生效」）：
-	/// **根因是两种模式的重剥节奏不对等，而不对等的源头是"暂停期间本系统根本不跑"**。取证（1.6.0f1）：
+	/// **根因是两种模式的重剥节奏不对等，而不对等的源头是"暂停期间本系统根本不跑"**。取证（1.6.2f1）：
 	/// <list type="number">
 	/// <item>原版重建挂在 <c>MainLoop</c> 驱动的链上：<c>SystemOrder.cs:60</c> 把 <c>ModificationSystem</c>
 	/// 注册在 <c>SystemUpdatePhase.MainLoop</c>，它在 OnUpdate 里连跑 Modification1…ModificationEnd
@@ -513,6 +514,14 @@ namespace AccessAnarchy.Systems
 		/// <summary>每隔多少个模拟帧输出一次心跳日志（诊断用）。</summary>
 		private const int kHeartbeatInterval = 1800;
 
+		/// <summary>存档窗口护栏（v0.8.11）：<c>onGameSaveLoad(start:false)</c> 迟到超过这么多秒，
+		/// 就认为配对事件丢了（存档抛异常时 `GameManager.Save` 的结束事件在 try 里、不在 finally 里，
+		/// 见反编译 `Game/SceneFlow/GameManager.cs:994` 与 `:998-1004`），护栏自行解除。
+		/// 取 120 秒：实机一次自动存档耗时约 1.8–2.0 秒（`Save` → `Saving completed`，2026-10-20 日志），
+		/// 手动存档带缩略图也就几秒；留两个数量级余量，正常存档绝不可能被误判成"丢了配对"。
+		/// ⚠ 这个兜底**只**为"不会永久冻住"存在，不是常规路径：真走到这里会打一条 WARN。</summary>
+		private const float kSaveGuardTimeoutSeconds = 120f;
+
 		/// <summary>关闭恢复后第 N 次检查前等待的模拟帧数（逐次放大）。
 		/// 不能只等几帧：GameSimulation 一帧渲染内可连追多步模拟，而 LaneOverlapSystem 在
 		/// MainLoop 的 Modification4B，追帧 burst 里它可能一次都没轮到——
@@ -774,6 +783,36 @@ namespace AccessAnarchy.Systems
 		/// 注意 v0.7.5 曾以为"给车道打 Updated"即可，实测无效，见类注释 v0.7.6。</summary>
 		private bool m_WasEnabled;
 
+		/// <summary>存档窗口护栏（v0.8.11：存读档期间不排任何写 job）。
+		///
+		/// 为什么需要：本系统最外层的不变量是"<c>LaneOverlap</c> 的改写只在自持 job 链内发生，
+		/// 且改写前一定 <see cref="WaitForJobs"/> 等到自己的 job 收尾"。但那条不变量只覆盖**我们自己**
+		/// 的并发，管不了游戏在同一时刻做别的事。存档流程里 <c>GameManager.Save</c> 会先
+		/// <c>CleanupMemory()</c> → <c>Resources.UnloadUnusedAssets()</c>（反编译
+		/// `Game/SceneFlow/GameManager.cs:915-933`），再起序列化系统遍历世界——
+		/// 而 2026-10-19 两次闪退（19:54、23:51）的崩点都紧贴一次自动存档开始，且崩点
+		/// （Unity 持久分配器被踩坏、托管栈为空）与"一个线程 free、另一个线程沿旧指针写"同形。
+		/// 归因证据不足以定罪本模组（玩家侧的逐个模组隔离测试也没能复现），
+		/// 但**在存档窗口里完全不改写世界**是零成本的降风险措施：存档期间我们本来也不该动数据。
+		///
+		/// 为什么用 <see cref="GameManager.onGameSaveLoad"/> 而不是 <c>SaveGameSystem.Enabled</c>/<c>m_Writing</c>：
+		/// 存档的**前半段**（<c>CleanupMemory</c> / <c>UnloadUnusedAssets</c>，也就是崩点所在）
+		/// 发生在 <c>SaveGameSystem.RunOnce()</c> 把 <c>Enabled</c> 置 true **之前**
+		/// （同文件 <c>:927</c> 的 <c>CleanupMemory()</c> 与 <c>:930</c> 的 <c>await m_SerializationSystem.RunOnce()</c>），
+		/// 只看那个标志会漏掉整个危险窗口。事件在 <c>:943</c> 同步触发，是唯一覆盖全程的信号。
+		///
+		/// 本标志只做一件事：让 <c>OnUpdate</c> 在护栏期间**一步都不排**（既不排 job、也不开 ECB），
+		/// 而不是去暂停一个正在跑的 job 链——现有不变量已经保证"进 OnUpdate 之前没有任何在飞 job"
+		/// （见 <see cref="m_JobChain"/> 注释），所以"不排"就等于"存档窗口里我们绝不碰内存"。</summary>
+		private bool m_SaveInFlight;
+
+		/// <summary><see cref="m_SaveInFlight"/> 的起算时刻（<c>UnityEngine.Time.realtimeSinceStartup</c>），
+		/// 只用于 <see cref="kSaveGuardTimeoutSeconds"/> 那个防永久冻住的兜底。</summary>
+		private float m_SaveInFlightSince;
+
+		/// <summary>护栏挡住过的步数（诊断用，心跳时读）。</summary>
+		private int m_SaveGuardSkips;
+
 		/// <summary>本局是否已经打过键位诊断（Setting.ReportKeyBindings "in-game"）。
 		/// 只能在系统跑起来之后打第一次：那时所有模组都注册完自己的动作了，
 		/// 游戏自己也在 UIReady 后算过 hasConflicts，冲突判定才有意义。</summary>
@@ -1005,6 +1044,43 @@ namespace AccessAnarchy.Systems
 			m_JobChain.Complete();
 		}
 
+		/// <summary>存档窗口护栏的开关（v0.8.11，见 <see cref="m_SaveInFlight"/>）。
+		///
+		/// 游戏在 <c>GameManager.Save</c> 里同步调用这个事件两次：开始存档（<c>start:true</c>，
+		/// 反编译 `Game/SceneFlow/GameManager.cs:943`）与存档结束（<c>start:false</c>，<c>:994</c>）。
+		/// 整个方法**不能抛**：事件是从游戏自己的存档流程里直接调过来的，
+		/// 这里抛出会把玩家的存档打断——那比闪退更不能接受。
+		///
+		/// ⚠ <c>start:false</c> 只在存档成功走到尾时才发（它在 try 里，不在 finally 里，
+		/// 见 `:998-1004`），所以解除有两条路：正常配对事件，或
+		/// <see cref="kSaveGuardTimeoutSeconds"/> 超时兜底（后者会让模组最多停摆两分钟，
+		/// 但绝不会永久冻住）。</summary>
+		private void OnGameSaveLoad(string saveName, string previewUri, bool start, bool success)
+		{
+			try
+			{
+				if (start)
+				{
+					m_SaveInFlight = true;
+					m_SaveInFlightSince = UnityEngine.Time.realtimeSinceStartup;
+					return;
+				}
+				m_SaveInFlight = false;
+			}
+			catch (Exception ex)
+			{
+				// 兜底解除，绝不让护栏因为一次异常而永久生效。
+				m_SaveInFlight = false;
+				try
+				{
+					AccessAnarchyMod.log.Warn("Save guard handler failed (guard released): " + ex);
+				}
+				catch (Exception)
+				{
+				}
+			}
+		}
+
 		/// <summary>
 		/// 取本帧的命令缓冲，接住游戏的拒绝。机制：本模组的 ECB 挂在《Game.EndFrameBarrier》上，
 		/// 它是《Game.SafeCommandBufferSystem》（ilspycmd 实读），<c>CreateCommandBuffer()</c> 在
@@ -1036,6 +1112,21 @@ namespace AccessAnarchy.Systems
 			base.OnCreate();
 			m_SimulationSystem = World.GetOrCreateSystemManaged<SimulationSystem>();
 			m_EndFrameBarrier = World.GetOrCreateSystemManaged<EndFrameBarrier>();
+			// v0.8.11：存档窗口护栏的订阅（见 m_SaveInFlight）。判空是必需的：
+			// 这条路径可能在"还没有关卡/正在关机"的窗口里走到，GameManager.instance 为 null。
+			try
+			{
+				GameManager gameManager = GameManager.instance;
+				if (gameManager != null)
+				{
+					gameManager.onGameSaveLoad += OnGameSaveLoad;
+				}
+			}
+			catch (Exception ex)
+			{
+				// 订阅失败不影响本系统主功能：只是少了一道存档期间的防护，照旧警告一句。
+				AccessAnarchyMod.log.Warn("Save guard could not subscribe to onGameSaveLoad (guard inactive this session): " + ex);
+			}
 			m_AnchorGrid = new NativeHashMap<int2, FixedList128Bytes<float2>>(4096, Allocator.Persistent);
 			m_VehicleSets = new NativeHashSet<Entity>[2]
 			{
@@ -1167,6 +1258,29 @@ namespace AccessAnarchy.Systems
 
 		protected override void OnDestroy()
 		{
+			// v0.8.11：先退订存档护栏。⚠ 必须做：本系统由 `UpdateAt` 注册、
+			// **不随模组卸载销毁**（见 AccessAnarchyMod.cs:203 的同一条注解），而
+			// `onGameSaveLoad` 是挂在 GameManager 单例上的实例事件 ⇒ 不退订就是一个
+			// 攥着本系统（连同它已 Dispose 的 Native 容器）的悬空委托，下一次存档会把它唤醒。
+			// 整段吞异常：退订只是清理，抛出会让 OnDestroy 半途失败、容器反而不释放了。
+			try
+			{
+				GameManager gameManager = GameManager.instance;
+				if (gameManager != null)
+				{
+					gameManager.onGameSaveLoad -= OnGameSaveLoad;
+				}
+			}
+			catch (Exception ex)
+			{
+				try
+				{
+					AccessAnarchyMod.log.Warn("Save guard could not unsubscribe from onGameSaveLoad: " + ex);
+				}
+				catch (Exception)
+				{
+				}
+			}
 			// ⚠ 稳定性关键一步（原生闪退自查，2026-09-30）：本系统的 job 读的是下面这些
 			// Allocator.Persistent 容器（锚点网格 / 两份邻域集合 / 候选清单 / 诊断计数）。
 			// ECS 不会替我们把 Dependency 等到零就进来，模组被卸载、退出到桌面、世界拆解都可能
@@ -1361,6 +1475,29 @@ namespace AccessAnarchy.Systems
 			// 放在 enabled 判断之前，是为了让时间戳在关闭态也跟着走——否则关掉模组再打开，
 			// 关闭期间攒下的渲染帧差会被读成一个假的暂停窗口。
 			DetectBlindWindow();
+			// v0.8.11：存档窗口护栏（见 m_SaveInFlight）。位置就在这里——DetectBlindWindow 之后
+			// （它的时间戳必须继续走，否则存档这段渲染帧差会在存档结束后被读成一个假的暂停窗口，
+			// 于是每次自动存档后都白扫一次全城），enabled 分支之前（关闭态的 RestoreVanillaOverlaps
+			// 本身也是**写**：它会请求原版重建 LaneOverlap，正是最该避开的动作）。
+			// 护栏期间直接 return：不排 job、不开 ECB、不改任何容器 ⇒ 存档窗口里我们对世界零写入。
+			if (m_SaveInFlight)
+			{
+				if (UnityEngine.Time.realtimeSinceStartup - m_SaveInFlightSince <= kSaveGuardTimeoutSeconds)
+				{
+					m_SaveGuardSkips++;
+					return;
+				}
+				// 配对事件丢了（存档流程抛异常时 `start:false` 不会发，见 OnGameSaveLoad 注释）。
+				// 宁可放行也不能让模组永久停摆：解除后一切照旧，只是少了一段保护。
+				m_SaveInFlight = false;
+				try
+				{
+					AccessAnarchyMod.log.Warn($"Save guard released by timeout after {kSaveGuardTimeoutSeconds:0}s without the save-completed event - resuming normal work (the save may have failed; if this repeats, please send this log).");
+				}
+				catch (Exception)
+				{
+				}
+			}
 			if (!enabled)
 			{
 				// 启用→关闭跳变：我们此前用 ECB.SetBuffer 删掉的 LaneOverlap 条目不会自动还原
@@ -1423,6 +1560,14 @@ namespace AccessAnarchy.Systems
 				// 心跳时顺带把两个自证指标读掉并清零（内部会先 Complete 依赖，所以每 ~30 秒
 				// 预期有一次极短的等待；稳态下没有长任务在飞，等待时间在亚毫秒级）。
 				ReportRebuildDiagnostics(globalMode);
+				// v0.8.11：护栏挡住过多少步也要能在事后从日志里读出来（否则"护栏到底有没有生效"
+				// 只能靠猜）。0 是常态——一次自动存档约 2 秒、一步模拟 1/60 秒量级，
+				// 挡住个位数到几十步都正常；只有**次数等于心跳周期**才说明护栏一直卡着。
+				if (m_SaveGuardSkips != 0)
+				{
+					AccessAnarchyMod.log.Info($"Save guard: skipped {m_SaveGuardSkips} step(s) while the game was saving (no world writes during saves).");
+					m_SaveGuardSkips = 0;
+				}
 			}
 
 			// 启用后第一遍此刻还没删过任何条目（本帧的删除要到帧末 ECB 回放才生效），
